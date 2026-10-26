@@ -28,6 +28,7 @@ apply" from "was not run" (no row at all).
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -45,7 +46,7 @@ from climateeval.exceptions import MissingDataError
 from climatebench2._thresholds import get_threshold
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 MONTHS_PER_YEAR = 12
 
@@ -294,13 +295,72 @@ def gate_tiers() -> dict[str, str]:
 
 
 class GateMixin:
-    """Mixin appending ``_gate_checks`` results to any diagnostic's output."""
+    """Mixin appending ``_gate_checks`` results to any diagnostic's output.
+
+    Two class-level switches, set for a whole run by
+    ``climatebench2 score`` (:func:`gate_switches`), never per instance:
+
+    ``comparison_ensemble``
+        Whether a gate that wraps an upstream ClimateEval complex diagnostic
+        runs that diagnostic's CMIP6 comparison ensemble too
+        (``_UpstreamGate._get_other_data`` in ``tier1_physics``). Upstream's
+        ECS, forced-response and heat-transport diagnostics glob the CMIP6
+        pool through ESMValCore and compute every model found — 90 % of a
+        Tier I run — and the values reach no gate decision of the
+        submission's (they only add gate rows for the comparison models
+        themselves). ``score --comparison frozen|none`` turns it off.
+    ``isolate_crashes``
+        Whether an unexpected exception inside a gate is logged (marker
+        ``CB2_GATE_CRASH``, with its traceback) and turned into an empty
+        output, so the suite carries on with the next diagnostic — ClimateEval's
+        ``Suite.get_database`` has no ``try`` around its loop, so otherwise
+        one crashing gate aborts the rest of the suite. The gate then simply
+        has no row, which the scorecard shows as "not run".
+    """
 
     _gate_checks: ClassVar[tuple[GateCheck, ...]] = ()
+    comparison_ensemble: ClassVar[bool] = True
+    isolate_crashes: ClassVar[bool] = False
 
     def get_output(self, data: Any, data_information: Any) -> DiagnosticOutput:
+        if not GateMixin.isolate_crashes:
+            return self._gated_output(data, data_information)
+        try:
+            return self._gated_output(data, data_information)
+        except (ConstraintMismatchError, MissingDataError):
+            raise  # missing data: SupersetExperimentMixin's own skip handles it
+        except Exception:  # noqa: BLE001 - isolation is the point
+            logger.opt(exception=True).error(
+                f"CB2_GATE_CRASH gate='{getattr(self, 'name', type(self).__name__)}' "
+                f"data='{getattr(data_information, 'id', data_information)}': "
+                "emitting no rows and continuing with the next diagnostic",
+            )
+            return DiagnosticOutput(
+                raw_output=None,
+                metrics=None,
+                variables=None,  # type: ignore[arg-type] - Suite skips None tables
+                data_sources=None,  # type: ignore[arg-type]
+            )
+
+    def _gated_output(self, data: Any, data_information: Any) -> DiagnosticOutput:
         output = super().get_output(data, data_information)  # type: ignore[misc]
         return apply_gate(output, self._gate_checks)
+
+
+@contextmanager
+def gate_switches(
+    *,
+    comparison_ensemble: bool = True,
+    isolate_crashes: bool = False,
+) -> Iterator[None]:
+    """Set :class:`GateMixin`'s run-wide switches, restoring them on exit."""
+    saved = (GateMixin.comparison_ensemble, GateMixin.isolate_crashes)
+    GateMixin.comparison_ensemble = comparison_ensemble
+    GateMixin.isolate_crashes = isolate_crashes
+    try:
+        yield
+    finally:
+        GateMixin.comparison_ensemble, GateMixin.isolate_crashes = saved
 
 
 class SupersetExperimentMixin:

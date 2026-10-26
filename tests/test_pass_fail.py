@@ -10,6 +10,7 @@ from climatebench2._thresholds import get_threshold, load_thresholds
 from climatebench2.diags.pass_fail import (
     REQUIREMENT_TAGS,
     GateCheck,
+    GateMixin,
     band_power_ratio,
     gate_metrics,
     gate_requirement,
@@ -295,3 +296,99 @@ def test_declared_not_applicable_gate_emits_na_rows_without_data() -> None:
     )
     assert not other.declared_not_applicable
     assert other.get_output({}, info).metrics is None
+
+
+# ---------------------------------------------------------------------------
+# Run-wide switches: the upstream comparison ensemble, crash isolation
+# ---------------------------------------------------------------------------
+
+#: The CB2 gates that wrap an upstream complex diagnostic with its own
+#: comparison-ensemble generator (``_UpstreamGate`` in tier1_physics).
+UPSTREAM_GATES = (
+    "ECSGate",
+    "LandOceanWarmingGate",
+    "ArcticAmplificationGate",
+    "MeridionalHeatTransportGate",
+)
+
+
+@pytest.mark.parametrize("gate_name", UPSTREAM_GATES)
+def test_upstream_gates_skip_the_comparison_ensemble_when_switched_off(
+    gate_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``score --comparison frozen|none``: upstream's pool glob never runs."""
+    pytest.importorskip("climateeval")
+    from climateeval.diags.complex._base import ComplexDiagnostic
+
+    from climatebench2 import diags
+    from climatebench2.diags.pass_fail import gate_switches
+
+    cls = getattr(diags, gate_name)
+    upstream = next(
+        k
+        for k in cls.__mro__
+        if "_get_other_data" in vars(k) and k.__module__.startswith("climateeval")
+    )
+    assert upstream is not ComplexDiagnostic  # it really has its own ensemble
+    calls: list[str] = []
+
+    def counting_generator(self):  # noqa: ANN001, ANN202
+        calls.append(type(self).__name__)
+        yield "a comparison model"
+
+    monkeypatch.setattr(upstream, "_get_other_data", counting_generator)
+    gate = object.__new__(cls)  # the generator needs no state but a name
+    gate._name = gate_name
+
+    assert list(gate._get_other_data()) == ["a comparison model"]  # live
+    assert calls == [gate_name]
+    with gate_switches(comparison_ensemble=False):
+        assert list(gate._get_other_data()) == []
+    assert calls == [gate_name]  # never called while switched off
+    assert list(gate._get_other_data()) == ["a comparison model"]  # restored
+
+
+class _CrashingBase:
+    """Stands in for the wrapped diagnostic."""
+
+    name = "crashy"
+    error: type[Exception] = RuntimeError
+
+    def get_output(self, data, data_information):  # noqa: ANN001, ANN201, ARG002
+        raise self.error("boom")
+
+
+class _CrashingGate(GateMixin, _CrashingBase):
+    _gate_checks = (GateCheck(check_id="crashy", column="x", lower=0.0),)
+
+
+def test_gate_crash_isolation_logs_and_returns_no_rows() -> None:
+    from loguru import logger
+
+    from climatebench2.diags.pass_fail import gate_switches
+
+    gate = _CrashingGate()
+    with pytest.raises(RuntimeError, match="boom"):
+        gate.get_output({}, "MyModel")  # off by default: stock behaviour
+
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="ERROR")
+    try:
+        with gate_switches(isolate_crashes=True):
+            output = gate.get_output({}, "MyModel")
+    finally:
+        logger.remove(sink)
+    assert output.raw_output is None
+    assert output.metrics is None
+    assert any("CB2_GATE_CRASH gate='crashy'" in m for m in messages)
+    assert any("RuntimeError: boom" in m for m in messages)  # traceback kept
+
+    # Missing data keeps its own handling (SupersetExperimentMixin's skip,
+    # or fail_on_missing_data): it is not a crash.
+    from climateeval.exceptions import MissingDataError
+
+    missing = _CrashingGate()
+    missing.error = MissingDataError
+    with gate_switches(isolate_crashes=True), pytest.raises(MissingDataError):
+        missing.get_output({}, "MyModel")

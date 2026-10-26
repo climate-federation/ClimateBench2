@@ -58,6 +58,8 @@ from climatebench2.diags.pass_fail import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from iris.cube import CubeList
     from xarray import Dataset
 
@@ -254,6 +256,17 @@ class _UpstreamGate(SupersetExperimentMixin, GateMixin):
         for kwarg, threshold_key in self._threshold_kwargs.items():
             kwargs.setdefault(kwarg, get_threshold(threshold_key))
         super().__init__(name, **kwargs)
+
+    def _get_other_data(self) -> Generator[ComplexDataSource]:
+        """Upstream's CMIP6 comparison ensemble, unless it is switched off.
+
+        ``GateMixin.comparison_ensemble`` (``score --comparison frozen|none``)
+        falls back to ``ComplexDiagnostic``'s empty generator, so upstream's
+        pool glob never runs; the submission's gate rows are unchanged.
+        """
+        if not GateMixin.comparison_ensemble:
+            return ComplexDiagnostic._get_other_data(self)  # noqa: SLF001
+        return super()._get_other_data()  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
