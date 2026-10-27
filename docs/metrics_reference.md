@@ -383,10 +383,20 @@ implemented and unit-tested; none is claimed to be the paper's own words.
     physics/initialisation pair `i1p1`, **any** forcing index (so UKESM1-0-LL, the
     CNRM-\* and the HadGEM3-\* families, which publish `f2`/`f3`, are not silently
     dropped as they are under upstream's `r*i1p1f1` facet), capped at the **first ten
-    realizations** per model by realization number. The staged root is built to that
-    policy and `StagedCMIP6HistoricalSSP245` simply enumerates what is there, so the
-    policy lives in the staging step and its manifest, not in a CB2 constant.
-    → §II.0, `climatebench2/data/cmip6_staged.py`.
+    realizations** per model by realization number. **In the package since
+    2026-10-27:** the policy used to live only in the out-of-repo staging script that
+    built the Levante root (`build_comparison_root.py`), so any other root (a cloud
+    bucket, a mirror holding every member) would have given a different `E_ref`. It is
+    now `data.cmip6_staged.select_members`, a pure function applied by
+    `StagedCMIP6HistoricalSSP245` to every root, with the pattern and the cap in
+    `tier2.comparison_ensemble.{member_pattern, max_members_per_model}`
+    (`"r*i1p1f*"`, 10). Its semantics are the staging script's exactly: realization
+    number ascending (numerically: `r2` before `r10`), ties ordered by name, and the
+    cap applied **per model before any variable is looked at**, so a model's ten
+    members are fixed and a variable some of them lack is scored on fewer. On the
+    Levante root (every model already ≤ 10 `i1p1` members) it is a no-op, so the
+    paper's databases and the frozen comparison bundle built from them are unchanged.
+    → §II.0, `climatebench2/data/cmip6_staged.py`, decision E.6.
 25. **Sea ice is extent, referenced against HadISST.** **RATIFIED 2026-09-20:** the
     protocol scores **extent** (Σ A where siconc ≥ 15 %), not area (Σ siconc·A) — a
     systematically larger number and far less sensitive to a concentration bias — and
@@ -552,7 +562,7 @@ implemented and unit-tested; none is claimed to be the paper's own words.
    level set, were fixed in CB2's copies *after* the PRs were opened. Retiring the CB2
    copies against the PRs as they stand would regress all four.
 
-### E. Protocol observations from the first real runs (2026-09-20) — Duncan to rule (5)
+### E. Protocol observations from the first real runs (2026-09-20) — Duncan to rule (6)
 
 **These are not code changes and none has been made.** In each case the code implements
 the paper's own definition and the paper's own bound, and the first real model says the
@@ -609,6 +619,20 @@ bound is unreachable or the definition is ambiguous. They are recorded here rath
    "latitude of the zonal-mean precipitation maximum" the literal argmax, or does it
    intend the smoother centroid definition the cited literature actually uses? Left as
    argmax (unchanged) pending a ruling; the centroid is not implemented. → I.8b.
+6. **The member cap is per model, not per variable (2026-10-27).** The ratified policy
+   (decision B.24) takes a model's first ten `r*i1p1f*` realizations **once**, and
+   scores a variable on whichever of those ten carry it; the alternative is to take,
+   per variable, the first ten that *have* the variable. The package implements the
+   former, which is what built the paper's ensemble (`select_members`). Measured on
+   the Levante staging (directory listings only; the Tier II farm the root was capped
+   from, plus the CMIP6 inventory for `clt`/`clwvi`/`clivi` and daily `pr`): of 630
+   (model, variable) cells, **3 would change, each by one added member, none crossing
+   the two-member line** that decides whether a fair CRPS exists — EC-Earth3 `siconc`
+   and daily `pr` (9 → 10, + `r14i1p1f1`) and IPSL-CM6A-LR daily `pr` (9 → 10,
+   + `r25i1p1f1`). On the staged root itself nothing changes (it holds only the capped
+   members). Keep the per-model cap, or switch? Switching would need the root
+   restaged and the frozen comparison bundle rebuilt. → §II.0,
+   `climatebench2/data/cmip6_staged.py`.
 
 ---
 
@@ -1895,7 +1919,7 @@ gone.
 | Baselines | — | 🟡 **Climatology** row wired as a *distribution* of the 1985–2014 values per calendar month (30 pseudo-members; ⚠ CB2 interpretation, see the Tier II preamble), scored on the test-window steps, its window carried past the test cut by `ReferenceBaselineRecord` (`a3ff255`). ✅ **Pattern scaling is now scored for a GMST-type annual series** (WP6b, `ce509c3` + `74a4841`): the packaged annual ERF table (`climatebench2/data/erf_ar6_ssp245.csv`) drives `two_layer_ebm`, `calibrate_two_layer_ebm` fits **one** parameter (λ by default) by least squares to the observed GMST **through 2014** with both series reduced to anomalies about the 1985–2014 window, and `ebm_pseudo_members` displaces the trajectory by the detrended observed residuals of that window so fair CRPS is defined (⚠ CB2 interpretation, as for the climatology). The row is scored on the test window only, carries the fitted parameter in `value`, and is written for the variables of `tier2.pattern_scaling.variables` alone — a variable the EBM says nothing about gets no row, one that cannot be fitted gets a `reason`. ⚠ the ERF table is **provisional**: a linear interpolation of published AR6 anchor values with **no natural forcing**, not the AR6 annual series (TODO in its header). ❌ the **spatial** half (the normalized CMIP6-MMM warming pattern) still emits a `reason` row — but **the reason has changed and the row's text is now stale**. It names upstream PR #44; with the staged comparison ensemble the post-2015 members exist, and what is actually missing is the comparison models' **baseline-window (1985–2014) maps**: `ReferenceEOFProjection` projects only each source's *test-window* anomaly, and the reference's pre-2015 record is the only pre-2015 field any diagnostic loads. Forming `mean over models of (test-window map − baseline-window map)/ΔGMST` needs a CB2 diagnostic that reaches back past the test-window cut for the *comparison* sources, the way `ReferenceBaselineRecord` does for the reference. That is a CB2 gap, not an upstream one. ❌ no climatology baseline for **regime (b)**. **CMIP6 MME**: pooled row deleted; the headline reference is the median of per-model scores | `baselines.py`, `scoring_pass._pattern_scaling_row`/`_eof_pattern_scaling_row`, `climatebench2/data/` |
 | σ_int (piControl internal variability) | (c) | ✅ (2026-09-14, `a3ff255`) `InternalVariability` — a `CB2ComplexDiagnostic` on the `picontrol` key in the **Tier I** suite (that is where the control is loaded in full), tagged `tier2.internal_variability.requirement: diagnostic` and emitting **no** gate row. For the global-mean annual series of each core variable it finds it reports `chunked_statistic_std` of the window **mean** and the OLS **trend** at both scored window lengths — the test window and 1950–present (`tier2.long_trend_start`) — plus the lengths themselves, so the pass can match a σ_int to the record it is scoring. `score_databases` collects the rows across every database of a run, which is how the Tier I control reaches the Tier II test | `tier2_scores.InternalVariability`, `scoring_pass.collect_internal_variability` |
 | Row identity across tiers | — | ✅ (2026-09-14, `a3ff255`) Tier I gate rows carry the full `DataSourceInformation.id` (they are written per data source) while the scoring pass writes the model **name**, so one model used to appear twice on the scorecard. `leaderboard.build_scores` now maps every frame's `data_id` through the `data_sources` tables, and its gate/CRPS/consistency routing is per **row** rather than per column — the pass writes consistency rows (carrying both `passes` and `p_value`) into the same `metrics` tables as the gates | `leaderboard/_label_by_model` |
-| **CMIP6 reference ensemble for the test window** | — | ✅ (2026-09-20, `3929b8a` + `dc1efc3`) — **the blocking dependency of every earlier revision is gone.** `climatebench2.data.StagedCMIP6HistoricalSSP245` enumerates `CMIP6_<model>_historical-ssp245_<member>/<freq>/<var>/` directories under `$CLIMATEBENCH2_STAGED_CMIP6_ROOT` (defaulting to `--data-root`) and yields one `ESMValToolIntakeDataSource` subclass per (model, member) with **byte-identical data-source ids** to upstream's generator, so `group_members` stacks them exactly as it would upstream and the two are interchangeable. A **derived** variable (`rtnt`, `phcint`) yields a member only when every required input is staged for it. Why not upstream's PR #44 generator: it globs the CMIP6 pool through ESMValCore once per (diagnostic, variable) — tens of seconds a call on the DKRZ replica, ~70 calls per Tier II run — its `r*i1p1f1` facet silently drops every f2/f3 model, it has no member cap, and it falls back to intake-esgf over the network. The staged root is built to the ratified member policy (i1p1, any forcing index, first ten realizations per model); the **real run has 42 models / 160 members** | `climatebench2/data/cmip6_staged.py` |
+| **CMIP6 reference ensemble for the test window** | — | ✅ (2026-09-20, `3929b8a` + `dc1efc3`) — **the blocking dependency of every earlier revision is gone.** `climatebench2.data.StagedCMIP6HistoricalSSP245` enumerates `CMIP6_<model>_historical-ssp245_<member>/<freq>/<var>/` directories under `$CLIMATEBENCH2_STAGED_CMIP6_ROOT` (defaulting to `--data-root`) and yields one `ESMValToolIntakeDataSource` subclass per (model, member) with **byte-identical data-source ids** to upstream's generator, so `group_members` stacks them exactly as it would upstream and the two are interchangeable. A **derived** variable (`rtnt`, `phcint`) yields a member only when every required input is staged for it. Why not upstream's PR #44 generator: it globs the CMIP6 pool through ESMValCore once per (diagnostic, variable) — tens of seconds a call on the DKRZ replica, ~70 calls per Tier II run — its `r*i1p1f1` facet silently drops every f2/f3 model, it has no member cap, and it falls back to intake-esgf over the network. The generator applies the ratified member policy itself (`select_members`: `tier2.comparison_ensemble.member_pattern` = `r*i1p1f*`, i.e. i1p1 and any forcing index, and the first `max_members_per_model` = 10 realizations per model, capped per model before per-variable availability — the semantics of the staging script that built the root, moved into the package 2026-10-27 so any root yields the paper's ensemble); the **real run has 42 models / 160 members** | `climatebench2/data/cmip6_staged.py` |
 | **Per-variable scored window** | — | ✅ (2026-09-20, `7c99720` + `9cb9cc8`) `climatebench2/reference_windows.py` clips the protocol window to each reference's staged record, in **whole calendar years**, from the NetCDF headers. Without it every reference whose record ends before the nominal window end was dropped with a logged warning and the variable scored **nothing, silently**. Realised windows on the staged root: `tas` 2015–2022 (HadCRUT5 to 2023-09), `pr` 2015–2023 (GPCP to 2024-09), TOA 2015–2024 (CERES-EBAF to 2025-09), `ts` 2015–2021 (MERRA2 to 2021-12), `siconc` 2015–2021 (HadISST to 2021-12), clouds the full test window (MODIS, 2002-07 to present; two years while the reference was ESACCI-CLOUD, to 2016-12). The CLI prints every window it clipped; derived references take the intersection of their inputs | `reference_windows.py`, `_cli.py` |
 
 ## II.0 Machinery as built (`climatebench2/scoring.py`, `scoring_pass.py`, `windows.py`, `diags/tier2_scores.py`, `diags/tier2_reference.py`, `baselines.py`, `leaderboard/`)

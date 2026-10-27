@@ -229,6 +229,19 @@ tier2:
   # window is skipped (with a logged reason) rather than half-sampled.
   climatology_baseline_min_years: 10
 
+  # The CMIP6 comparison ensemble behind E_ref (paper §5.6 and the Fig. 4
+  # caption: "Each model's ensemble comprises its r*i1p1f* members, capped at
+  # the first 10"; ratified by Duncan 2026-09-20). Applied by
+  # `data.cmip6_staged.select_members` inside the generator, so any data root
+  # yields the same ensemble: members matching `member_pattern` (each index a
+  # number or `*`), ordered by realization number, the first
+  # `max_members_per_model` per model. The cap is taken per MODEL before any
+  # variable is looked at, so a variable some of those members lack is scored
+  # on fewer of them, never on later members that happen to carry it.
+  comparison_ensemble:
+    member_pattern: "r*i1p1f*"
+    max_members_per_model: 10
+
   # REGIME (a) IS SCORED ON ANOMALIES (paper §scoring; metrics_reference.md
   # "(a) Time-resolved quantities"). Every scored time series — the
   # submission's members, the reference and every comparison member — is first

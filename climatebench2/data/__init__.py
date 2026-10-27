@@ -11,8 +11,9 @@ things that do:
 
 * :class:`~climatebench2.data.cmip6_staged.StagedCMIP6HistoricalSSP245` — a
   *discovery policy*, not data: it finds the CMIP6 historical+SSP2-4.5
-  comparison ensemble in a pre-staged root instead of globbing the pool, with
-  the protocol's member policy and member cap applied at staging time. It
+  comparison ensemble in a pre-staged root instead of globbing the pool, and
+  applies the protocol's member policy and member cap itself
+  (:func:`~climatebench2.data.cmip6_staged.select_members`). It
   yields ClimateEval data sources with ids identical to
   :class:`climateeval.data.CMIP6HistoricalSSP245`, which stays the documented
   alternative.
