@@ -108,6 +108,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -504,8 +505,17 @@ def _freeze_schema(  # noqa: C901, PLR0912, PLR0913, PLR0915
     *,
     source_index: int,
     entries: dict[str, Any],
+    excluded: set[str],
+    fresh: set[tuple[str, str]],
+    replace: bool,
+    replaced: list[str],
 ) -> None:
-    """Copy one source schema's comparison rows into the open bundle."""
+    """Copy one source schema's comparison rows into the open bundle.
+
+    ``fresh`` are the pairs this freeze already took from an earlier source
+    (always a clash); a pair from an earlier freeze is swapped out only with
+    ``replace``.
+    """
     ids = _comparison_ids(con, "src", schema, tables)
     if not ids:
         return
@@ -523,10 +533,19 @@ def _freeze_schema(  # noqa: C901, PLR0912, PLR0913, PLR0915
             for r in con.execute(
                 f"SELECT DISTINCT var_id FROM {raw} WHERE {where} ORDER BY 1",  # noqa: S608
             ).fetchall()
+            if str(r[0]) not in excluded
         ]
-        selects = [(f"SELECT DISTINCT *, var_id AS {VARIABLE_COLUMN} FROM {raw} WHERE {where}", [])]  # noqa: S608
+        selects = [
+            (
+                f"SELECT DISTINCT *, var_id AS {VARIABLE_COLUMN} FROM {raw} "  # noqa: S608
+                f"WHERE {where} AND var_id IN (SELECT unnest(?::VARCHAR[]))",
+                [variables],
+            ),
+        ]
     elif layout == "wide":
-        variables = [v for v in variable_ids if v in raw_columns]
+        variables = [
+            v for v in variable_ids if v in raw_columns and v not in excluded
+        ]
         keys = [c for c in raw_columns if c not in variable_ids]
         selects = [
             (
@@ -538,7 +557,7 @@ def _freeze_schema(  # noqa: C901, PLR0912, PLR0913, PLR0915
             for v in variables
         ]
     elif len(variable_ids) == 1:
-        variables = list(variable_ids)
+        variables = [v for v in variable_ids if v not in excluded]
         selects = [(f"SELECT DISTINCT *, ? AS {VARIABLE_COLUMN} FROM {raw} WHERE {where}", variables)]  # noqa: S608
     else:
         msg = (
@@ -548,31 +567,57 @@ def _freeze_schema(  # noqa: C901, PLR0912, PLR0913, PLR0915
         )
         raise FrozenComparisonError(msg)
 
-    clash = [v for v in variables if v in entries.get(schema, {})]
+    if not variables:
+        return
+    clash = [v for v in variables if (schema, v) in fresh]
     if clash:
         msg = (
             f"schema '{schema}' variable(s) {clash} arrive from more than one "
             f"source database; pass each (diagnostic, variable) once"
         )
         raise FrozenComparisonError(msg)
+    frozen_before = [v for v in variables if v in entries.get(schema, {})]
+    if frozen_before and not replace:
+        msg = (
+            f"schema '{schema}' variable(s) {frozen_before} are already in the "
+            f"bundle; re-freeze them with replace (--replace)"
+        )
+        raise FrozenComparisonError(msg)
+    for var_id in frozen_before:
+        _drop_entry(con, schema, var_id)
+        del entries[schema][var_id]
+        replaced.append(f"{schema}/{var_id}")
 
     for sql, params in selects:
         _append(con, "bundle", schema, "raw_output", sql, params)
 
     if "metrics" in tables:
         metric_columns = _columns(con, "src", schema, "metrics")
-        if "var_id" in metric_columns or len(variable_ids) == 1:
-            variable_expr = "var_id" if "var_id" in metric_columns else "?"
-            unscored = "AND scorer IS NULL" if "scorer" in metric_columns else ""
+        unscored = "AND scorer IS NULL" if "scorer" in metric_columns else ""
+        metrics_sql = (
+            f"FROM {_ref('src', schema, 'metrics')} "  # noqa: S608
+            f"WHERE data_id IN (SELECT data_id FROM cb2_ids) {unscored}"
+        )
+        if layout == "single":
+            # One suite variable: every metric row is its own, whatever its
+            # var_id says (pr_extremes_series writes one per index column).
             _append(
                 con,
                 "bundle",
                 schema,
                 "metrics",
-                f"SELECT DISTINCT *, {variable_expr} AS {VARIABLE_COLUMN} "  # noqa: S608
-                f"FROM {_ref('src', schema, 'metrics')} "
-                f"WHERE data_id IN (SELECT data_id FROM cb2_ids) {unscored}",
-                [] if variable_expr == "var_id" else variable_ids,
+                f"SELECT DISTINCT *, ? AS {VARIABLE_COLUMN} {metrics_sql}",
+                variables,
+            )
+        elif "var_id" in metric_columns:
+            _append(
+                con,
+                "bundle",
+                schema,
+                "metrics",
+                f"SELECT DISTINCT *, var_id AS {VARIABLE_COLUMN} {metrics_sql} "
+                f"AND var_id IN (SELECT unnest(?::VARCHAR[]))",
+                [variables],
             )
 
     if "data_sources" in tables:
@@ -687,30 +732,18 @@ def _entry_summary(
     }
 
 
-def freeze(
-    db_paths: Sequence[Path | str],
-    out_dir: Path | str,
-    *,
-    nominal_timerange: str | None = None,
-    notes: dict[str, str] | None = None,
+def default_excluded_variables() -> list[str]:
+    """Variables a bundle leaves out unless asked (``tier2.frozen_comparison``)."""
+    return [str(v) for v in get_threshold("tier2.frozen_comparison.exclude_variables")]
+
+
+def _new_manifest(
+    nominal_timerange: str | None,
+    notes: dict[str, str] | None,
+    excluded: set[str],
 ) -> dict[str, Any]:
-    """Build a bundle from finished result databases; returns the manifest.
-
-    ``nominal_timerange`` is the Tier II window the source runs were made
-    over (their ``--timerange``, or the protocol default on the day they
-    ran) — not recoverable from the databases, so it is the caller's
-    statement, and a frozen run with no ``--timerange`` adopts it.
-    """
-    import duckdb  # noqa: PLC0415
-
-    out = Path(out_dir)
-    if out.exists() and any(out.iterdir()):
-        msg = f"{out} is not empty; a bundle is written into a fresh directory"
-        raise FrozenComparisonError(msg)
-    out.mkdir(parents=True, exist_ok=True)
-
     values, fingerprint = protocol_fingerprint()
-    manifest: dict[str, Any] = {
+    return {
         "format": FORMAT,
         "format_version": FORMAT_VERSION,
         "created": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
@@ -718,53 +751,167 @@ def freeze(
         "protocol_fingerprint": fingerprint,
         "protocol_thresholds": values,
         "nominal_timerange": nominal_timerange,
+        "excluded_variables": sorted(excluded),
         "notes": dict(notes or {}),
+        "history": [],
         "sources": [],
         "databases": {},
     }
-    for index, db in enumerate(Path(p).resolve() for p in db_paths):
-        if not db.is_file():
-            msg = f"Database not found: {db}"
+
+
+def _drop_entry(con: Any, schema: str, var_id: str) -> None:  # noqa: ANN401
+    """Delete one frozen (schema, variable) from the open bundle.
+
+    Its ``data_sources`` rows stay: they are shared with the schema's other
+    variables, and a merge only takes the sources of the rows it merges.
+    """
+    for table, column in (
+        ("raw_output", VARIABLE_COLUMN),
+        ("metrics", VARIABLE_COLUMN),
+        ("variables", "id"),
+    ):
+        if _columns(con, "bundle", schema, table):
+            con.execute(
+                f"DELETE FROM {_ref('bundle', schema, table)} WHERE {_q(column)} = ?",  # noqa: S608
+                [var_id],
+            )
+
+
+def freeze(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    db_paths: Sequence[Path | str],
+    out_dir: Path | str,
+    *,
+    nominal_timerange: str | None = None,
+    notes: dict[str, str] | None = None,
+    exclude: Iterable[str] = (),
+    include: Iterable[str] = (),
+    extend: bool = False,
+    replace: bool = False,
+) -> dict[str, Any]:
+    """Build — or extend — a bundle from finished result databases.
+
+    ``nominal_timerange`` is the Tier II window the source runs were made
+    over (their ``--timerange``, or the protocol default on the day they
+    ran) — not recoverable from the databases, so it is the caller's
+    statement, and a frozen run with no ``--timerange`` adopts it.
+
+    Variables in ``tier2.frozen_comparison.exclude_variables`` and
+    ``exclude`` are left out, unless named in ``include``.
+
+    ``extend`` adds the (diagnostic, variable) pairs of further databases to
+    an existing bundle — one variable group at a time, as the paper's split
+    runs were made — after checking it was made under the same protocol and
+    window. A pair already in the bundle is an error unless ``replace``, which
+    swaps it for the new database's rows: how a group is re-frozen (e.g. once
+    OHC is staged, or after a re-run) without redoing the rest. The bundle
+    databases are written to temporary copies and only replace the old ones,
+    with the new manifest, once everything succeeded.
+
+    Returns the manifest.
+    """
+    import duckdb  # noqa: PLC0415
+
+    out = Path(out_dir)
+    if extend:
+        manifest = load_manifest(out)
+        check_provenance(manifest, timerange=nominal_timerange)
+        nominal_timerange = nominal_timerange or manifest.get("nominal_timerange")
+        excluded = set(manifest.get("excluded_variables", ())) | set(exclude)
+        if notes:
+            manifest.setdefault("notes", {}).update(notes)
+    else:
+        if out.exists() and any(out.iterdir()):
+            msg = (
+                f"{out} is not empty; a bundle is written into a fresh directory "
+                f"(or extended with extend=True / --extend)"
+            )
             raise FrozenComparisonError(msg)
-        stem = db.stem
-        manifest["sources"].append(
-            {
-                "path": str(db),
-                "database": stem,
-                "size": db.stat().st_size,
-                "sha256": _sha256(db),
-            },
-        )
-        record = manifest["databases"].setdefault(
-            stem,
-            {"file": f"{stem}.ddb", "entries": {}},
-        )
-        con = duckdb.connect(":memory:")
-        try:
-            con.execute(f"ATTACH '{out / record['file']}' AS bundle")
-            con.execute(f"ATTACH '{db}' AS src (READ_ONLY)")
-            for schema, tables in sorted(_tables(con, "src").items()):
-                if "raw_output" in tables:
+        excluded = set(default_excluded_variables()) | set(exclude)
+        manifest = _new_manifest(nominal_timerange, notes, excluded)
+    excluded -= set(include)
+    manifest["excluded_variables"] = sorted(excluded)
+    out.mkdir(parents=True, exist_ok=True)
+
+    staged: dict[str, Path] = {}
+    added: set[tuple[str, str, str]] = set()
+    replaced: list[str] = []
+    first_index = len(manifest["sources"])
+    try:
+        for index, db in enumerate(
+            (Path(p).resolve() for p in db_paths),
+            start=first_index,
+        ):
+            if not db.is_file():
+                msg = f"Database not found: {db}"
+                raise FrozenComparisonError(msg)
+            stem = db.stem
+            manifest["sources"].append(
+                {
+                    "path": str(db),
+                    "database": stem,
+                    "size": db.stat().st_size,
+                    "sha256": _sha256(db),
+                },
+            )
+            record = manifest["databases"].setdefault(stem, {"entries": {}})
+            record["file"] = record.get("file") or f"{stem}.ddb"
+            if stem not in staged:
+                staged[stem] = out / f"{record['file']}.partial"
+                staged[stem].unlink(missing_ok=True)
+                if (out / record["file"]).is_file():
+                    shutil.copy2(out / record["file"], staged[stem])
+            con = duckdb.connect(":memory:")
+            try:
+                con.execute(f"ATTACH '{staged[stem]}' AS bundle")
+                con.execute(f"ATTACH '{db}' AS src (READ_ONLY)")
+                for schema, tables in sorted(_tables(con, "src").items()):
+                    if "raw_output" not in tables:
+                        continue
                     _freeze_schema(
                         con,
                         schema,
                         tables,
                         source_index=index,
                         entries=record["entries"],
+                        excluded=excluded,
+                        fresh={(s, v) for t, s, v in added if t == stem},
+                        replace=replace,
+                        replaced=replaced,
                     )
-            con.execute("DETACH src")
-            con.execute("CHECKPOINT bundle")
-        finally:
-            con.close()
-    for stem, record in manifest["databases"].items():
-        path = out / record["file"]
-        record["size"] = path.stat().st_size
-        record["sha256"] = _sha256(path)
-        if not record["entries"]:
-            path.unlink()
+                    added |= {
+                        (stem, schema, v)
+                        for v, e in record["entries"].get(schema, {}).items()
+                        if e["source"] == index
+                    }
+                con.execute("DETACH src")
+                con.execute("CHECKPOINT bundle")
+            finally:
+                con.close()
+    except BaseException:
+        for path in staged.values():
+            path.unlink(missing_ok=True)
             Path(str(path) + ".wal").unlink(missing_ok=True)
+        raise
+
+    for stem, path in staged.items():
+        record = manifest["databases"][stem]
+        final = out / record["file"]
+        path.replace(final)
+        record["size"] = final.stat().st_size
+        record["sha256"] = _sha256(final)
+        if not record["entries"]:
+            final.unlink()
             record["file"] = None
-        del stem
+    manifest["history"].append(
+        {
+            "at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+            "action": "extend" if extend else "freeze",
+            "software": software_provenance(),
+            "sources": list(range(first_index, len(manifest["sources"]))),
+            "added": sorted(f"{s}/{v}" for _t, s, v in added),
+            "replaced": sorted(replaced),
+        },
+    )
     (out / MANIFEST).write_text(
         json.dumps(manifest, indent=2, sort_keys=False, default=str) + "\n",
         encoding="utf-8",
@@ -1165,6 +1312,14 @@ def merge(
             report,
             replace=replace,
         )
+        excluded = set(manifest.get("excluded_variables", ()))
+        for schema, var_id in [p for p in report.missing if p[1] in excluded]:
+            report.missing.remove((schema, var_id))
+            report.messages.append(
+                f"'{schema}'/{var_id}: scored, but the bundle leaves {var_id} out "
+                f"on purpose (tier2.frozen_comparison.exclude_variables) — no "
+                f"E_ref, no skill",
+            )
         if report.missing and not allow_missing:
             pairs = ", ".join(f"{s}/{v}" for s, v in report.missing)
             msg = (

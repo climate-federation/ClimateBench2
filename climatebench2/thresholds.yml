@@ -441,6 +441,14 @@ tier2:
     variance_explained: 0.9            # keep the leading modes reaching 90%
     max_modes: 20                      # hard cap on the retained modes
     min_modes: 1
+  # Frozen comparison bundles (climatebench2.frozen_comparison, `climatebench2
+  # freeze-comparison`): variables a bundle leaves out unless asked for with
+  # --include-variable. `ts` (MERRA-2 skin temperature) is dropped from the v2
+  # cloud protocol (Duncan, 2026-10-27); it stays buildable. A scored entry of
+  # an excluded variable in a frozen run gets no E_ref, with a note, not an
+  # error.
+  frozen_comparison:
+    exclude_variables: [ts]
   # Internal variability sigma_int for the consistency test: the piControl
   # global-mean annual series chunked into observation-length segments
   # (scoring.chunked_statistic_std) for the window MEAN and the OLS TREND.

@@ -1118,6 +1118,10 @@ def _cmd_freeze_comparison(args: argparse.Namespace) -> None:
             args.out,
             nominal_timerange=args.timerange,
             notes=_parse_notes(args.note),
+            exclude=args.exclude_variable or (),
+            include=args.include_variable or (),
+            extend=args.extend,
+            replace=args.replace,
         )
     except FrozenComparisonError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1143,6 +1147,13 @@ def _cmd_freeze_comparison(args: argparse.Namespace) -> None:
             "Note: no --timerange given, so the bundle pins no nominal Tier II "
             "window; a frozen run then uses today's protocol default and only "
             "the per-variable windows are checked",
+            file=sys.stderr,
+        )
+    if manifest.get("excluded_variables"):
+        print(
+            f"Left out: {', '.join(manifest['excluded_variables'])} "
+            f"(tier2.frozen_comparison.exclude_variables / --exclude-variable; "
+            f"--include-variable keeps one)",
             file=sys.stderr,
         )
     print(f"Wrote {args.out / 'manifest.json'}", file=sys.stderr)
@@ -1503,7 +1514,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="DIR",
-        help="Bundle directory to create (must be empty or absent).",
+        help=(
+            "Bundle directory to create (must be empty or absent), or the "
+            "bundle to add to with --extend."
+        ),
     )
     freeze_parser.add_argument(
         "--timerange",
@@ -1522,6 +1536,41 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Free-form provenance for the manifest (repeatable), e.g. the "
             "CB2/ClimateEval commits the source runs used."
+        ),
+    )
+    freeze_parser.add_argument(
+        "--exclude-variable",
+        action="append",
+        metavar="VAR",
+        help=(
+            "Leave a suite variable out of the bundle (repeatable), on top of "
+            "tier2.frozen_comparison.exclude_variables in thresholds.yml "
+            "(currently ts: dropped from the v2 cloud protocol)."
+        ),
+    )
+    freeze_parser.add_argument(
+        "--include-variable",
+        action="append",
+        metavar="VAR",
+        help="Keep a variable the default exclusion would leave out (repeatable).",
+    )
+    freeze_parser.add_argument(
+        "--extend",
+        action="store_true",
+        help=(
+            "Add the databases' (diagnostic, variable) pairs to the EXISTING "
+            "bundle in --out — one variable group at a time, e.g. OHC once it "
+            "is staged — after checking it was made under the same protocol "
+            "and window. The rest of the bundle is kept as it is."
+        ),
+    )
+    freeze_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help=(
+            "With --extend: swap a (diagnostic, variable) already in the "
+            "bundle for the new database's rows (re-freeze a group after a "
+            "re-run) instead of refusing."
         ),
     )
     freeze_parser.set_defaults(func=_cmd_freeze_comparison)

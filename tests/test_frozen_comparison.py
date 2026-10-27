@@ -444,6 +444,83 @@ def test_a_bundle_from_another_protocol_is_refused(live_db: Path, tmp_path: Path
         fc.check_provenance(tampered, timerange=None)
 
 
+def _group_db(directory: Path, var: str, *, seed_shift: float = 0.0) -> Path:
+    """A split-suite database of one variable group (named ``var``)."""
+    tables = _split(_live_tables(), "tas")
+    for frames in tables.values():
+        raw = frames["raw_output"]
+        if "var_id" in raw.columns:
+            raw["var_id"] = var
+        else:
+            raw.rename(columns={"tas": var}, inplace=True)
+            raw[var] = (raw[var] + np.float32(seed_shift)).astype(np.float32)
+        frames["metrics"]["var_id"] = var
+        frames["variables"]["id"] = var
+        frames["variables"]["var_name"] = var
+    directory.mkdir(parents=True, exist_ok=True)
+    return _write(directory / "ClimateBench2_TierII.ddb", tables)
+
+
+def test_ts_is_left_out_by_default_and_can_be_kept(tmp_path: Path) -> None:
+    ts = _group_db(tmp_path / "ts", "ts")
+    manifest = fc.freeze([ts, _group_db(tmp_path / "pr", "pr")], tmp_path / "bundle")
+    assert manifest["excluded_variables"] == ["ts"]  # thresholds.yml default
+    entries = manifest["databases"]["ClimateBench2_TierII"]["entries"]
+    assert {v for e in entries.values() for v in e} == {"pr"}
+
+    kept = fc.freeze([ts], tmp_path / "with_ts", include=["ts"])
+    assert kept["excluded_variables"] == []
+    assert set(kept["databases"]["ClimateBench2_TierII"]["entries"][WIDE]) == {"ts"}
+
+    # A frozen run that still scores ts gets a note, not an error.
+    run = _copy_stripped(ts, tmp_path / "run")
+    report = fc.merge(run, tmp_path / "bundle", stripped={WIDE: ["ts"], EOF: ["ts"]})
+    assert not report.missing
+    assert any("leaves ts out on purpose" in m for m in report.messages)
+
+
+def test_a_bundle_is_extended_one_variable_group_at_a_time(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    fc.freeze([_group_db(tmp_path / "tas", "tas")], bundle, nominal_timerange="20150101/20341231")
+    ohc = _group_db(tmp_path / "ohc", "ohc")
+
+    with pytest.raises(fc.FrozenComparisonError, match="not empty"):
+        fc.freeze([ohc], bundle)
+    manifest = fc.freeze([ohc], bundle, extend=True, notes={"ohc": "staged later"})
+    entries = manifest["databases"]["ClimateBench2_TierII"]["entries"]
+    assert set(entries[WIDE]) == {"tas", "ohc"}
+    assert entries[WIDE]["tas"]["source"] == 0
+    assert entries[WIDE]["ohc"]["source"] == 1
+    assert [h["action"] for h in manifest["history"]] == ["freeze", "extend"]
+    assert manifest["nominal_timerange"] == "20150101/20341231"
+    assert manifest["notes"] == {"ohc": "staged later"}
+
+    # Re-freezing a group: refused, unless replacing; the rest is untouched.
+    rerun = _group_db(tmp_path / "ohc_rerun", "ohc", seed_shift=1.0)
+    with pytest.raises(fc.FrozenComparisonError, match="already in the bundle"):
+        fc.freeze([rerun], bundle, extend=True)
+    assert not list(bundle.glob("*.partial"))  # a failed extend leaves no debris
+    manifest = fc.freeze([rerun], bundle, extend=True, replace=True)
+    entries = manifest["databases"]["ClimateBench2_TierII"]["entries"]
+    assert entries[WIDE]["ohc"]["source"] == 2
+    assert entries[WIDE]["ohc"]["raw_rows"] == entries[WIDE]["tas"]["raw_rows"]
+    assert manifest["history"][-1]["replaced"] == [f"{WIDE}/ohc", f"{EOF}/ohc"]
+    con = duckdb.connect(str(bundle / "ClimateBench2_TierII.ddb"), read_only=True)
+    ohc_rows = con.execute(
+        f"SELECT count(*), avg(ohc) FROM {WIDE}.raw_output WHERE cb2_variable = 'ohc'",
+    ).fetchone()
+    tas_rows = con.execute(
+        f"SELECT count(*), avg(tas) FROM {WIDE}.raw_output WHERE cb2_variable = 'tas'",
+    ).fetchone()
+    con.close()
+    assert ohc_rows[0] == tas_rows[0]  # the old ohc rows are gone, not doubled
+    assert ohc_rows[1] == pytest.approx(tas_rows[1] + 1.0, abs=1e-4)
+
+    # An extension must be made under the bundle's protocol and window.
+    with pytest.raises(fc.FrozenComparisonError, match="Tier II window"):
+        fc.freeze([_group_db(tmp_path / "pr", "pr")], bundle, extend=True, nominal_timerange="20150101/20251231")
+
+
 # ---------------------------------------------------------------------------
 # End to end: `climatebench2 score` on synthetic cubes
 # ---------------------------------------------------------------------------
