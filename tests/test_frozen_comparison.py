@@ -679,6 +679,7 @@ def cli(tmp_path_factory):  # noqa: ANN001, ANN201
     import climateeval._loader as loader
 
     from climatebench2._cli import main
+    from climatebench2.data import STAGED_ROOT_ENV
 
     root = tmp_path_factory.mktemp("frozen_e2e")
     members = []
@@ -694,6 +695,9 @@ def cli(tmp_path_factory):  # noqa: ANN001, ANN201
 
     def run(*argv: str) -> None:
         with pytest.MonkeyPatch.context() as patch:
+            # `score --data-root` exports the staged-ensemble root; keep it
+            # from leaking into later tests.
+            patch.delenv(STAGED_ROOT_ENV, raising=False)
             patch.setattr(loader, "load_cmor_dir", fake_load)
             patch.setattr(
                 "climatebench2.scoring_pass._bootstrap_settings",
