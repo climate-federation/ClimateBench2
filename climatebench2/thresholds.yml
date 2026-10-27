@@ -326,7 +326,6 @@ tier2:
   obs_sigma:
     default: null
     tas: 0.05                          # K; HadCRUT5 annual global-mean 1-sigma
-    ts: 0.05                           # K; as tas
     tos: 0.05                          # K; SST products, TODO(Duncan)
     pr: null                           # TODO(Duncan): GPCP global-mean 1-sigma
     rsut: 0.20                         # W m-2; CERES-EBAF stability, TODO(Duncan)
@@ -508,7 +507,7 @@ tier2:
     # the baseline row is written for these series only (matched as the suite
     # variable id, then the token before its first underscore) — never for
     # precipitation, fluxes or sea ice, where it would be meaningless.
-    variables: [tas, ts, tos]
+    variables: [tas, tos]
     # Fewer observed years than this before `calibration_end_year` and the
     # baseline is not fitted at all: a `reason` row says so instead.
     min_calibration_years: 10
