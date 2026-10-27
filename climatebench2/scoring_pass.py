@@ -1786,6 +1786,21 @@ def is_scalar_output(raw_df: pd.DataFrame) -> bool:
     return bool((raw_df["data_type"] == "reference").any())
 
 
+def is_scorable_layout(columns: set[str] | frozenset[str]) -> bool:
+    """Whether a ``raw_output`` with these columns is one of the pass's shapes.
+
+    A time series (``time``), an EOF-coefficient table or aggregated scalars
+    (no coordinate axis at all) — given ``reference`` rows, which the caller
+    checks. A map, annual cycle or zonal line is never scored. Used by
+    :mod:`climatebench2.frozen_comparison` to tell which comparison rows a
+    frozen run cannot do without.
+    """
+    columns = set(columns)
+    if not {"data_id", "data_type"} <= columns:
+        return False
+    return "time" in columns or _EOF_COLUMNS <= columns or not columns & _AXIS_COLUMNS
+
+
 def _first_finite_value(frame: pd.DataFrame, column: str) -> float:
     """First finite value of ``column``, or NaN.
 
