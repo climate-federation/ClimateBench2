@@ -50,6 +50,7 @@ climatebench2/
 ├── physics.py           # pure Tier I physics + ETCCDI indices (numpy only)
 ├── baselines.py         # climatology pseudo-members, calibrated two-layer EBM
 ├── shared_sources.py    # reference + comparison ensemble loaded once for all members
+├── frozen_comparison.py # freeze the CMIP6 comparison rows into a bundle; merge into a run
 ├── data/                # cmip6_staged.py (StagedCMIP6HistoricalSSP245: the ensemble behind
 │                        #   E_ref), imerg.py (daily pr), modis.py (clouds), ERF table (EBM)
 ├── leaderboard/         # .ddb results -> scores table -> static HTML page
@@ -90,6 +91,11 @@ climatebench2/
 - Every **gate** row carries its protocol `tier` (I/II/III) and `requirement`
   (required/extended/extra/diagnostic) plus `applicable`; the leaderboard groups by
   (tier, requirement) and computes the entry ticket over the Required group.
+- A frozen comparison run (`--comparison frozen`) must give the same `E_ref` as
+  the live run its bundle came from: never let a merge go through on a
+  mismatched window, variables row or protocol fingerprint
+  (`frozen_comparison.PROTOCOL_THRESHOLDS` lists the `thresholds.yml` entries
+  that shape comparison rows; extend it when a diagnostic reads a new one).
 - **Every bound lives in `thresholds.yml`**, read via `_thresholds.get_threshold`;
   never hard-code one in a diagnostic.
 
@@ -114,6 +120,16 @@ climatebench2 score MODEL --name MyModel --truth DIR --truth-name CESM2 \
     --truth-member r2i1p1f1=DIR          # Tier III.2 perfect model (window = perfect-model)
 climatebench2 score MODEL --no-score     # suites only; run the Tier II pass later
 climatebench2 score MODEL --no-cache     # re-load reference + ensemble for every member
+climatebench2 freeze-comparison run/*.ddb -o BUNDLE --timerange 20150101/20251231
+#   copy the CMIP6 comparison rows (data_type 'other', non-observational) of live
+#   runs into a bundle (.ddb per suite + manifest.json); --extend adds a variable
+#   group, --replace re-freezes one; tier2.frozen_comparison.exclude_variables (ts)
+climatebench2 score MODEL --comparison frozen --frozen-comparison BUNDLE
+#   strip the ensemble generators from other_data, Tier I wrappers skip theirs,
+#   merge BUNDLE before the pass (keys: suite stem, schema, variable); refuses a
+#   protocol/window/variables-row mismatch. --comparison none: no E_ref at all.
+#   --isolate-crashes (default on unless live): CB2_GATE_CRASH, suite continues
+climatebench2 merge-comparison BUNDLE DB...  # merge into existing DBs (--replace)
 #   other score flags: --timerange, --download, --institute/--exp/--variant (provenance)
 climatebench2 leaderboard MyModel_climatebench2/*.ddb -o board.html   # or --csv FILE
 climateeval report MyModel_climatebench2/*.ddb   # ClimateEval's per-model report

@@ -120,6 +120,37 @@ while still loading everything else from `--data-root`. Unstaged members or
 variables are left out of the ensemble. The Tier III proxy targets are made by
 [paleo_scripts/](paleo_scripts/README.md).
 
+### Scoring without the comparison ensemble (frozen bundle)
+
+Running the ensemble is most of a Tier II run and needs the staged pool.
+None of its rows depends on the submission, so they can be copied out of a
+finished live run once and reused
+([climatebench2/frozen_comparison.py](climatebench2/frozen_comparison.py)):
+
+```bash
+# Once, from live result databases (split-suite databases are fine):
+climatebench2 freeze-comparison run/*.ddb -o frozen_v2.0 --timerange 20150101/20251231
+climatebench2 freeze-comparison ohc/*.ddb -o frozen_v2.0 --extend   # add a variable group later
+# Then per submission, with only the submission and the references on disk:
+climatebench2 score model/Amon --name MyModel --data-root refs \
+    --comparison frozen --frozen-comparison frozen_v2.0
+```
+
+`--comparison frozen` drops the ensemble generators from every suite's
+`other_data` (the reference and observational products stay), skips the
+Tier I wrappers' upstream ensemble, and merges the bundle's rows into each
+database before the scoring pass, so `E_ref` and the skill are the frozen
+ensemble's. The run stops if the bundle was made under another protocol
+(`thresholds.yml` fingerprint, version, Tier II window, which a frozen run
+adopts when `--timerange` is not given) or a variable's resolved window
+differs, and after the suites if a scored diagnostic has no frozen rows
+(`--allow-missing-comparison` accepts an empty `E_ref` instead).
+`--comparison none` scores without any `E_ref`. `--isolate-crashes` (on by
+default with `frozen`/`none`) logs a crashing gate as `CB2_GATE_CRASH` and
+carries on. Variables in `tier2.frozen_comparison.exclude_variables` (`ts`)
+are left out of a bundle unless `--include-variable` keeps them.
+`merge-comparison DIR DB...` merges a bundle into existing databases.
+
 ## Thresholds and specification
 
 Every pass/fail bound, scoring constant, protocol window and gate tag
