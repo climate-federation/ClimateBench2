@@ -1,0 +1,49 @@
+# ClimateBench v2 scoring profile: everything that must be identical between
+# two submissions for their scores to be comparable. A submission scored under
+# this profile is compared against the frozen CMIP6 ensemble below; changing
+# any entry (a reference version, the window, the bundle) is a new profile.
+name: v2
+description: >-
+  ClimateBench v2 Tier I gates and Tier II scores. Tier II is scored over
+  2015-2025, clipped per variable to the last complete year of its reference
+  (HadCRUT5 2022, GPCP 2023, CERES-EBAF and IMERG 2024, HadISST 2025).
+
+# Object-storage locations. gs:// URIs are read anonymously (the bucket is
+# public); s3:// URIs use the pod's IAM role. Override per run with
+# --references-uri / --comparison-uri (e.g. an S3 mirror in the cluster's
+# region).
+references_uri: gs://climatebench/v2/references/
+comparison_uri: gs://climatebench/v2/comparison/
+
+# Verify every reference file against MANIFEST.json before scoring.
+verify_references: true
+
+# Tier II window passed to `climatebench2 score --timerange`; must equal the
+# frozen bundle's nominal window (the CLI refuses a mismatch).
+timerange: 20150101/20251231
+
+suites:
+  - ClimateBench2_TierI
+  - ClimateBench2_TierI_variability
+  - ClimateBench2_TierII_events
+  - ClimateBench2_TierII
+  - ClimateBench2_TierII_daily
+
+# Entries scored without a frozen comparison (no E_ref, skill empty). The
+# run proceeds with --allow-missing-comparison; cb2_run.py records which
+# (suite, diagnostic, variable) rows ended up without E_ref in run.json.
+allow_missing_comparison: true
+
+# Submission layout under the model URI: one directory per experiment, the
+# Tier II ensemble under `historical-ssp245/<member>/`. Directory name ->
+# `climatebench2 score --experiment` key.
+experiments:
+  piControl: picontrol
+  abrupt-4xCO2: 4xco2
+  hist-aer: histaer
+  amip: amip
+  amip-4xCO2: amip4xco2
+  historical-day: day
+  patch-ep: patch_ep
+  patch-wp: patch_wp
+ensemble_dir: historical-ssp245

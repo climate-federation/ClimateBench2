@@ -1,0 +1,14 @@
+# ESMValCore configuration inside the ClimateBench2 image.
+#
+# The pod has no site data pool and must not reach ESGF: the references come
+# from the v2 bundle (`climatebench2 score --data-root`) and the CMIP6
+# comparison ensemble from the frozen bundle. An empty rootpath makes any
+# accidental ESMValCore data discovery find nothing instead of downloading.
+search_esgf: never
+rootpath:
+  default: /nonexistent
+download_dir: /scratch/esmvaltool/download
+output_dir: /scratch/esmvaltool/output
+auxiliary_data_dir: /scratch/esmvaltool/auxiliary
+max_parallel_tasks: 1
+log_level: warning

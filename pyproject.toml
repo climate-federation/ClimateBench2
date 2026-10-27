@@ -17,11 +17,13 @@ authors = [
 # For local development against a checkout instead:
 #   pip install -e ../ClimateEval && pip install -e . --no-deps
 dependencies = [
-    # b0e941c (2026-09) — ClimateEval main with the merged CB2 upstream PR #35
-    # (LandOceanWarmingRatio / ArcticAmplification / MeridionalHeatTransport
-    # complex diagnostics; rsds/rsus/rlds/rlus/tasmax/tasmin in variables.yml),
-    # which the CB2 gate wrappers in diags/tier1_physics.py require.
-    "climateeval @ git+https://github.com/climate-federation/ClimateEval.git@b0e941c163ae71c929a61026bf6491f530a3e253",
+    # d2559b2 (2026-10-22) — ClimateEval main with every upstream PR the shipped
+    # suites need merged (sea-ice extent, Nino34 window, staged-file timerange
+    # filter, coordinate reconciliation, parabolic MHT peak, the CMIP6
+    # generators). Same pixi.lock as the commit behind the paper's results
+    # (33e45db); no Tier I gate value or Tier II raw_output differs (audited
+    # 2026-10-27). deploy/Dockerfile's CLIMATEEVAL_REF must match.
+    "climateeval @ git+https://github.com/climate-federation/ClimateEval.git@d2559b2fb1f70f37b84d41a281f81e79db754aba",
     "pyyaml",
 ]
 

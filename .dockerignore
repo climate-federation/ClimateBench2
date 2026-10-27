@@ -1,0 +1,9 @@
+.git
+**/__pycache__
+*.egg-info
+paleo_scripts/paleo_data_cache
+analysis
+observations
+results
+*.ipynb
+*.ddb

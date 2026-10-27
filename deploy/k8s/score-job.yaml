@@ -1,0 +1,74 @@
+# Score one submission: a Kubernetes Job running the cb2-run entrypoint.
+#
+# Fill in the four values marked <...> (or use deploy/submit.sh, which does it
+# from the command line) and apply:
+#   kubectl -n climatebench create -f score-job.yaml
+#
+# Sizing: references (~34 GB), the frozen comparison bundle (<0.1 GB) and the
+# submission are copied to the pod's ephemeral volume. A 10-member submission
+# with Tier I experiments is typically 100-300 GB of NetCDF; the daily
+# precipitation suite holds each member's daily `pr` in memory one at a time.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: cb2-score-
+  namespace: climatebench
+  labels:
+    app.kubernetes.io/name: climatebench2
+    climatebench2/model: <MODEL_NAME>
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 604800
+  activeDeadlineSeconds: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: climatebench2
+    spec:
+      serviceAccountName: cb2-scorer
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: score
+          image: ghcr.io/climate-federation/climatebench2:<IMAGE_TAG>
+          args:
+            - python
+            - /opt/cb2/cb2_run.py
+            - --model-uri=<MODEL_URI>
+            - --name=<MODEL_NAME>
+            - --output-uri=<OUTPUT_URI>
+            - --profile=v2
+            # Read the bundles from an S3 mirror in the cluster's region
+            # instead of the public GCS bucket (avoids cross-cloud egress):
+            # - --references-uri=s3://<BUCKET>/v2/references/
+            # - --comparison-uri=s3://<BUCKET>/v2/comparison/
+          env:
+            - name: CB2_IMAGE
+              value: ghcr.io/climate-federation/climatebench2:<IMAGE_TAG>
+            - name: DASK_NUM_WORKERS
+              value: "8"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 64Gi
+              ephemeral-storage: 400Gi
+            limits:
+              memory: 120Gi
+              ephemeral-storage: 600Gi
+          volumeMounts:
+            - name: scratch
+              mountPath: /scratch
+      volumes:
+        # Generic ephemeral volume: a fresh gp3 EBS volume per pod, deleted
+        # with it. Swap for an emptyDir on instance-store NVMe nodes.
+        - name: scratch
+          ephemeral:
+            volumeClaimTemplate:
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                storageClassName: gp3
+                resources:
+                  requests:
+                    storage: 600Gi

@@ -1,0 +1,50 @@
+name: scoring image
+
+# Build the ClimateBench v2 scoring image (deploy/Dockerfile) and push it to
+# GHCR: `main` -> :main and :sha-<short>, a tag vX.Y.Z -> :X.Y.Z and :latest.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/climatebench2
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Smoke test: the image starts, the environment imports, the CLIs answer.
+      - name: smoke
+        run: |
+          IMG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          docker run --rm "$IMG" climatebench2 --help
+          docker run --rm "$IMG" python /opt/cb2/cb2_run.py --help
+          docker run --rm "$IMG" python -c "import climateeval, climatebench2, iris, esmvalcore; print('ok')"

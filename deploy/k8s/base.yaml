@@ -1,0 +1,20 @@
+# One-off cluster setup for ClimateBench v2 scoring on EKS.
+#
+# The service account is bound to an IAM role (IRSA) that may READ the
+# submission bucket and the reference/comparison mirror, and WRITE the results
+# prefix. Replace the placeholders before applying:
+#   <ACCOUNT_ID>, <ROLE_NAME>
+#
+#   kubectl apply -f deploy/k8s/base.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: climatebench
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cb2-scorer
+  namespace: climatebench
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>
