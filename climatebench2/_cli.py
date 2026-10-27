@@ -10,6 +10,12 @@ Subcommands
     ClimateEval and write one DuckDB results database per suite (default:
     the CB2 tier suites, which grow per the delineation plan §6), then run
     the Tier II scoring pass over them (``--no-score`` skips it).
+``climatebench2 freeze-comparison DB [DB ...] -o DIR``
+    Copy the CMIP6 comparison ensemble's rows out of finished result
+    databases into a frozen bundle (:mod:`climatebench2.frozen_comparison`),
+    so that ``score --comparison frozen --frozen-comparison DIR`` can score a
+    new submission without the comparison ensemble on disk;
+    ``merge-comparison DIR DB ...`` merges a bundle into existing databases.
 ``climatebench2 leaderboard DB [DB ...]``
     Build the ClimateBench2 leaderboard from result databases;
     ``--rescore`` re-runs the Tier II scoring pass over them first, and
@@ -209,20 +215,26 @@ def default_tier2_timerange(today: dt.date | None = None) -> str:
     return windows.test_window_timerange(today)
 
 
-def suite_timerange(spec: SuiteSpec, explicit: str | None = None) -> str | None:
+def suite_timerange(
+    spec: SuiteSpec,
+    explicit: str | None = None,
+    tier2_window: str | None = None,
+) -> str | None:
     """Resolve the ISO timerange for one suite (``None`` = no cut).
 
     ``explicit`` (the user's ``--timerange``) overrides the cube suites'
     default windows, but never the piControl-sourced ``full`` window: a
     control run has its own calendar, so an instrumental-era range would
-    only throw its data away.
+    only throw its data away. ``tier2_window`` replaces today's protocol
+    default for the Tier II window only — a frozen comparison bundle's
+    window, which must not move with the date.
     """
     if spec.shape != "cubes" or spec.window == "full":
         return None
     if explicit is not None:
         return explicit
     if spec.window == "tier2":
-        return default_tier2_timerange()
+        return tier2_window or default_tier2_timerange()
     return DEFAULT_TIMERANGE
 
 
@@ -370,6 +382,48 @@ def materialise_truth_suite(
     return str(target)
 
 
+def materialise_stripped_suite(
+    resolved: str,
+    out_dir: Path,
+) -> tuple[str, dict[str, list[str]]]:
+    """Write a copy of a suite YAML without its comparison-ensemble generators.
+
+    ``score --comparison frozen|none``: every ``other_data`` entry that is a
+    generator (the CMIP6 comparison ensemble) is dropped, observational
+    products and ``reference_data`` are kept
+    (:func:`climatebench2.frozen_comparison.strip_comparison_ensemble`). Same
+    stem, so the suite keeps its name and its database filename. Returns the
+    path and ``entry -> [variable id]`` of what was stripped.
+    """
+    import yaml
+
+    from climatebench2.frozen_comparison import strip_comparison_ensemble
+
+    from climateeval.suites._base import resolve_suite_definition_file
+
+    source = resolve_suite_definition_file(resolved)
+    definition = yaml.safe_load(source.read_text(encoding="utf-8"))
+    stripped_definition, stripped = strip_comparison_ensemble(definition)
+    target = out_dir / f"{source.stem}.yml"
+    target.write_text(
+        yaml.safe_dump(stripped_definition, sort_keys=False),
+        encoding="utf-8",
+    )
+    return str(target), stripped
+
+
+def _parse_notes(specs: list[str] | None) -> dict[str, str]:
+    """Parse repeated ``--note KEY=VALUE`` options."""
+    notes: dict[str, str] = {}
+    for spec in specs or []:
+        key, sep, value = spec.partition("=")
+        if not sep or not key:
+            msg = f"--note expects KEY=VALUE, got '{spec}'"
+            raise SystemExit(msg)
+        notes[key.strip()] = value
+    return notes
+
+
 def _parse_experiments(specs: list[str] | None) -> dict[str, Path]:
     """Parse repeated ``--experiment KEY=PATH`` options."""
     experiments: dict[str, Path] = {}
@@ -436,7 +490,174 @@ def _suite_spec(
     )
 
 
-def _cmd_score(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915
+#: ``score --comparison`` modes.
+COMPARISON_MODES = ("live", "frozen", "none")
+
+
+@dataclass
+class ComparisonSetup:
+    """Where the CMIP6 comparison ensemble of a ``score`` run comes from.
+
+    ``live`` runs it (the staged pool, or upstream's pool glob for the Tier I
+    wrappers); ``frozen`` strips it from the suites and merges a
+    :mod:`climatebench2.frozen_comparison` bundle into the databases before
+    the scoring pass; ``none`` strips it and merges nothing, so ``E_ref`` and
+    the skill stay empty.
+    """
+
+    mode: str = "live"
+    bundle: Path | None = None
+    manifest: dict[str, Any] | None = None
+    #: The bundle's nominal Tier II window, used when --timerange is absent.
+    tier2_window: str | None = None
+    isolate_crashes: bool = False
+
+
+def comparison_setup(args: argparse.Namespace) -> ComparisonSetup:
+    """Validate ``--comparison``/``--frozen-comparison`` before anything runs.
+
+    A frozen bundle's provenance is checked here, so a mismatch fails in
+    seconds rather than after the suites (the per-variable windows are
+    checked per suite before it runs, the coverage after it, see
+    :func:`_run_score`).
+    """
+    mode = getattr(args, "comparison", "live") or "live"
+    bundle = getattr(args, "frozen_comparison", None)
+    isolate = getattr(args, "isolate_crashes", None)
+    setup = ComparisonSetup(
+        mode=mode,
+        isolate_crashes=(mode != "live") if isolate is None else bool(isolate),
+    )
+    if mode != "frozen":
+        if bundle is not None:
+            msg = "--frozen-comparison needs --comparison frozen"
+            raise SystemExit(msg)
+        return setup
+    if bundle is None:
+        msg = "--comparison frozen needs --frozen-comparison DIR"
+        raise SystemExit(msg)
+    if getattr(args, "truth", None) is not None:
+        msg = (
+            "--comparison frozen cannot be combined with --truth: a "
+            "perfect-model run has no CMIP6 comparison ensemble (use "
+            "--comparison none)"
+        )
+        raise SystemExit(msg)
+    from climatebench2.frozen_comparison import (
+        FrozenComparisonError,
+        check_provenance,
+        load_manifest,
+    )
+
+    try:
+        manifest = load_manifest(bundle)
+        window = args.timerange or manifest.get("nominal_timerange")
+        notes = check_provenance(manifest, timerange=window)
+    except FrozenComparisonError as exc:
+        raise SystemExit(str(exc)) from exc
+    for note in notes:
+        print(f"Note: frozen comparison bundle: {note}", file=sys.stderr)
+    setup.bundle = Path(bundle)
+    setup.manifest = manifest
+    setup.tier2_window = manifest.get("nominal_timerange")
+    return setup
+
+
+def _check_frozen_windows(
+    stem: str,
+    stripped: dict[str, list[str]],
+    windows_used: dict[str, tuple[str, str]],
+    manifest: dict[str, Any],
+) -> None:
+    """Compare each stripped variable's resolved window with the bundle's.
+
+    Runs before the suite does: the resolved window depends on the date and
+    on how far each staged reference reaches, and comparison rows over a
+    different window would make ``E_ref`` meaningless.
+    """
+    entries = manifest.get("databases", {}).get(stem, {}).get("entries", {})
+    mismatches: list[str] = []
+    absent: list[str] = []
+    for entry, variables in stripped.items():
+        for var_id in variables:
+            frozen = entries.get(entry, {}).get(var_id)
+            if frozen is None:
+                absent.append(f"{entry}/{var_id}")
+                continue
+            used = windows_used.get(f"{entry}/{var_id}")
+            if used is not None and frozen["timerange"] and (
+                used[0] not in frozen["timerange"]
+            ):
+                mismatches.append(
+                    f"{entry}/{var_id}: run {used[0]}, bundle "
+                    f"{', '.join(frozen['timerange'])}",
+                )
+    if mismatches:
+        msg = (
+            f"Suite '{stem}': the frozen comparison rows were produced over "
+            f"different windows than this run resolves (a different "
+            f"--timerange, or a staged reference that now reaches further): "
+            + "; ".join(mismatches)
+        )
+        raise SystemExit(msg)
+    if absent:
+        print(
+            f"Note: suite '{stem}': the frozen bundle has no comparison rows "
+            f"for {', '.join(absent)}; that is fatal after the run for any of "
+            f"them the scoring pass scores (unless --allow-missing-comparison), "
+            f"and harmless for a deterministic entry (map, annual cycle, "
+            f"baseline record)",
+            file=sys.stderr,
+        )
+
+
+def merge_frozen_comparison(
+    db_paths: list[Path],
+    setup: ComparisonSetup,
+    stripped_by_stem: dict[str, dict[str, list[str]]],
+    *,
+    allow_missing: bool,
+) -> None:
+    """Merge the bundle into each database before the scoring pass."""
+    from climatebench2.frozen_comparison import FrozenComparisonError, merge
+
+    assert setup.bundle is not None  # noqa: S101 - comparison_setup guarantees it
+    print(
+        f"\nMerging the frozen comparison ensemble from {setup.bundle}…",
+        file=sys.stderr,
+    )
+    for path in db_paths:
+        try:
+            report = merge(
+                path,
+                setup.bundle,
+                stripped=stripped_by_stem.get(path.stem, {}),
+                allow_missing=allow_missing,
+            )
+        except FrozenComparisonError as exc:
+            msg = (
+                f"{exc}\nThe suite databases are written; after fixing the "
+                f"bundle, `climatebench2 merge-comparison BUNDLE DB` then "
+                f"`climatebench2 leaderboard --rescore DB` finish the run."
+            )
+            raise SystemExit(msg) from exc
+        print(f"  {report.summary()}", file=sys.stderr)
+        for message in report.messages:
+            print(f"    {message}", file=sys.stderr)
+
+
+def _cmd_score(args: argparse.Namespace) -> None:
+    from climatebench2.diags.pass_fail import gate_switches
+
+    setup = comparison_setup(args)
+    with gate_switches(
+        comparison_ensemble=setup.mode == "live",
+        isolate_crashes=setup.isolate_crashes,
+    ):
+        _run_score(args, setup)
+
+
+def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noqa: C901, PLR0912, PLR0915
     if not args.model.exists():
         msg = f"Model path not found: {args.model}"
         raise SystemExit(msg)
@@ -565,16 +786,48 @@ def _cmd_score(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR091
             variable_kwargs={} if timerange is None else {"timerange": timerange},
         )
 
+    if setup.mode != "live":
+        print(
+            f"Comparison ensemble: {setup.mode} — the CMIP6 comparison "
+            f"generators are stripped from every suite's other_data "
+            f"(observational products kept) and the Tier I gate wrappers skip "
+            f"upstream's ensemble"
+            + (
+                f"; the frozen rows of {setup.bundle} are merged in before the "
+                f"scoring pass"
+                if setup.mode == "frozen"
+                else "; E_ref and the skill stay EMPTY"
+            )
+            + (
+                f". Tier II window pinned to the bundle's {setup.tier2_window}"
+                if setup.mode == "frozen" and args.timerange is None
+                else ""
+            )
+            + f". Gate crash isolation: {'on' if setup.isolate_crashes else 'off'}.",
+            file=sys.stderr,
+        )
+
     suite_names = args.suite or DEFAULT_SUITES
     db_paths: list[Path] = []
     declared_seen: set[str] = set()
+    stripped_by_stem: dict[str, dict[str, list[str]]] = {}
     for suite_name in suite_names:
         resolved = _resolve_suite(suite_name)
         stem = Path(resolved).stem
 
+        # Before any diagnostic is built: building one instantiates its
+        # other_data generators, which is what a frozen/none run avoids.
+        stripped: dict[str, list[str]] = {}
+        if setup.mode != "live":
+            stripped_dir = out_dir / "_comparison_stripped_suites"
+            stripped_dir.mkdir(parents=True, exist_ok=True)
+            resolved, stripped = materialise_stripped_suite(resolved, stripped_dir)
+            if stripped:
+                stripped_by_stem[stem] = stripped
+
         diagnostics = build_suite(resolved, {}, None)._get_diagnostics()
         spec = _suite_spec(stem, diagnostics, ComplexDiagnostic)
-        timerange = suite_timerange(spec, args.timerange)
+        timerange = suite_timerange(spec, args.timerange, setup.tier2_window)
 
         # The truth run replaces the observations only where there ARE
         # observations to replace: the cube suites fed by the submission. The
@@ -629,6 +882,7 @@ def _cmd_score(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR091
         #     1850-2100 record, which is what a 12 h daily job timed out
         #     reading for every comparison-ensemble member (2026-09-26).
         suite_timerange_kwarg: str | None = timerange
+        windows_used: dict[str, tuple[str, str]] = {}
         if timerange is not None or spec.reference_overlap:
             windowed_dir = out_dir / "_windowed_suites"
             windowed_dir.mkdir(parents=True, exist_ok=True)
@@ -654,6 +908,9 @@ def _cmd_score(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR091
                 )
                 for line in moved:
                     print(line, file=sys.stderr)
+
+        if setup.mode == "frozen" and stripped and setup.manifest is not None:
+            _check_frozen_windows(stem, stripped, windows_used, setup.manifest)
 
         suite = build_suite(resolved, extra_kwargs, suite_timerange_kwarg)
 
@@ -728,7 +985,7 @@ def _cmd_score(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR091
                 (load(path, load_timerange), info_for(label)) for label, path in chosen
             ]
 
-        if spec.window == "tier2":
+        if spec.window == "tier2" and setup.mode == "live":
             root = staged_root(args.data_root)
             print(
                 "Note: the CMIP6 comparison ensemble of the Tier II suites is "
@@ -795,6 +1052,14 @@ def _cmd_score(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR091
             file=sys.stderr,
         )
 
+    if db_paths and setup.mode == "frozen":
+        merge_frozen_comparison(
+            db_paths,
+            setup,
+            stripped_by_stem,
+            allow_missing=args.allow_missing_comparison,
+        )
+
     if db_paths and not args.no_score:
         run_scoring_pass(db_paths)
 
@@ -842,6 +1107,65 @@ def run_scoring_pass(db_paths: list[Path]) -> None:
         print(f"  {report.summary()}", file=sys.stderr)
         for message in report.messages:
             print(f"  {message}", file=sys.stderr)
+
+
+def _cmd_freeze_comparison(args: argparse.Namespace) -> None:
+    from climatebench2.frozen_comparison import FrozenComparisonError, freeze
+
+    try:
+        manifest = freeze(
+            args.db,
+            args.out,
+            nominal_timerange=args.timerange,
+            notes=_parse_notes(args.note),
+        )
+    except FrozenComparisonError as exc:
+        raise SystemExit(str(exc)) from exc
+    for stem, record in manifest["databases"].items():
+        entries = record["entries"]
+        pairs = sum(len(v) for v in entries.values())
+        print(
+            f"{stem}: {pairs} (diagnostic, variable) pair(s) frozen"
+            + (f" -> {args.out / record['file']} ({record['size']} bytes)"
+               if record.get("file") else " (no comparison rows)"),
+            file=sys.stderr,
+        )
+        for schema, variables in sorted(entries.items()):
+            for var_id, entry in sorted(variables.items()):
+                print(
+                    f"  {schema}/{var_id}: {entry['n_models']} models, "
+                    f"{entry['n_members']} members, {entry['raw_rows']} rows, "
+                    f"window {', '.join(entry['timerange']) or '?'}",
+                    file=sys.stderr,
+                )
+    if manifest.get("nominal_timerange") is None:
+        print(
+            "Note: no --timerange given, so the bundle pins no nominal Tier II "
+            "window; a frozen run then uses today's protocol default and only "
+            "the per-variable windows are checked",
+            file=sys.stderr,
+        )
+    print(f"Wrote {args.out / 'manifest.json'}", file=sys.stderr)
+
+
+def _cmd_merge_comparison(args: argparse.Namespace) -> None:
+    from climatebench2.frozen_comparison import (
+        FrozenComparisonError,
+        check_provenance,
+        load_manifest,
+        merge,
+    )
+
+    try:
+        for note in check_provenance(load_manifest(args.bundle), timerange=None):
+            print(f"Note: {note}", file=sys.stderr)
+        for path in args.db:
+            report = merge(path, args.bundle, replace=args.replace)
+            print(report.summary(), file=sys.stderr)
+            for message in report.messages:
+                print(f"  {message}", file=sys.stderr)
+    except FrozenComparisonError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _cmd_leaderboard(args: argparse.Namespace) -> None:
@@ -1102,10 +1426,122 @@ def build_parser() -> argparse.ArgumentParser:
             "(N members = N reads of the whole ensemble)."
         ),
     )
+    score.add_argument(
+        "--comparison",
+        choices=COMPARISON_MODES,
+        default="live",
+        help=(
+            "Where the CMIP6 comparison ensemble behind E_ref comes from. "
+            "live (default): run it, as always — the staged pool must be on "
+            "disk. frozen: strip the comparison generators from every suite's "
+            "other_data (observational products and the reference stay), "
+            "skip the Tier I gate wrappers' upstream ensemble, and merge the "
+            "rows of --frozen-comparison DIR into the databases before the "
+            "scoring pass, so E_ref is that frozen ensemble's. none: strip as "
+            "for frozen and merge nothing — E_ref and the skill stay empty."
+        ),
+    )
+    score.add_argument(
+        "--frozen-comparison",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Bundle written by `climatebench2 freeze-comparison` (with "
+            "--comparison frozen). Its protocol fingerprint, ClimateBench2 "
+            "version and Tier II window must match this run's, and each "
+            "variable's resolved window must match the bundle's, or the run "
+            "stops; without --timerange the Tier II window is the bundle's."
+        ),
+    )
+    score.add_argument(
+        "--allow-missing-comparison",
+        action="store_true",
+        help=(
+            "With --comparison frozen: let a scored (diagnostic, variable) "
+            "that the bundle has no rows for go through with an empty E_ref "
+            "and skill, instead of stopping the run."
+        ),
+    )
+    score.add_argument(
+        "--isolate-crashes",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Log an unexpected exception inside a gate (marker "
+            "CB2_GATE_CRASH) and carry on with the next diagnostic instead of "
+            "aborting the suite; the gate then has no row. Default: on with "
+            "--comparison frozen/none (unattended scoring of a submission), "
+            "off with live (today's behaviour)."
+        ),
+    )
     score.add_argument("--institute", default="", help="Institute (provenance).")
     score.add_argument("--exp", default="", help="Experiment (provenance).")
     score.add_argument("--variant", default="", help="Variant label (provenance).")
     score.set_defaults(func=_cmd_score)
+
+    freeze_parser = subparsers.add_parser(
+        "freeze-comparison",
+        help=(
+            "Copy the CMIP6 comparison ensemble's rows out of result databases "
+            "into a frozen bundle for `score --comparison frozen`."
+        ),
+    )
+    freeze_parser.add_argument(
+        "db",
+        type=Path,
+        nargs="+",
+        help=(
+            "Result .ddb file(s) of a LIVE run; split-suite databases (one "
+            "variable group each) are fine, each (diagnostic, variable) may "
+            "come from one database only. One bundle database per suite stem."
+        ),
+    )
+    freeze_parser.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Bundle directory to create (must be empty or absent).",
+    )
+    freeze_parser.add_argument(
+        "--timerange",
+        default=None,
+        help=(
+            "The nominal Tier II window the source runs used (their "
+            "--timerange, or the protocol default the day they ran, e.g. "
+            "20150101/20251231). Recorded and enforced: a frozen run without "
+            "--timerange adopts it."
+        ),
+    )
+    freeze_parser.add_argument(
+        "--note",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "Free-form provenance for the manifest (repeatable), e.g. the "
+            "CB2/ClimateEval commits the source runs used."
+        ),
+    )
+    freeze_parser.set_defaults(func=_cmd_freeze_comparison)
+
+    merge_parser = subparsers.add_parser(
+        "merge-comparison",
+        help="Merge a frozen comparison bundle into existing result databases.",
+    )
+    merge_parser.add_argument("bundle", type=Path, help="Bundle directory.")
+    merge_parser.add_argument("db", type=Path, nargs="+", help="DuckDB .ddb file(s).")
+    merge_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help=(
+            "First delete every comparison row of each diagnostic the bundle "
+            "covers (all its variables), instead of refusing to merge into a "
+            "database that already has some."
+        ),
+    )
+    merge_parser.set_defaults(func=_cmd_merge_comparison)
 
     leaderboard = subparsers.add_parser(
         "leaderboard",
