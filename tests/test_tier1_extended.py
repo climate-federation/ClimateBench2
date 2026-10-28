@@ -9,6 +9,7 @@ fields go straight through the gate.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -20,9 +21,14 @@ from iris.coords import DimCoord  # noqa: E402
 from iris.cube import Cube, CubeList  # noqa: E402
 
 from climatebench2 import physics  # noqa: E402
+from climatebench2._thresholds import get_threshold  # noqa: E402
 from climatebench2.diags import ENSOTeleconnectionsGate, PrecipBuoyancyGate  # noqa: E402
+from climatebench2.diags.tier1_extended import restrict_to_years  # noqa: E402
 
 from test_tier1_physics import _info, _monthly_cube  # noqa: E402
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 N_YEARS = 20
 LATS = np.linspace(-85.0, 85.0, 18)
@@ -167,6 +173,8 @@ def test_teleconnections_reraise_when_failing_on_missing_data(monkeypatch) -> No
 
 PLEV = np.array([100000.0, 85000.0, 50000.0, 25000.0])
 PR_PER_UNIT_TA = 4.0e-5  # kg m-2 s-1 per K of the (uniform) ta anomaly
+#: The protocol window, tier1.precip_buoyancy.obs_window (paper App. B.3).
+WINDOW = (1983, 2014)
 
 
 def _level_cube(
@@ -177,8 +185,13 @@ def _level_cube(
     n_years: int,
     series: np.ndarray | None = None,
     start_year: int = 1850,
+    profile: np.ndarray | None = None,
 ) -> Cube:
-    """A (time, plev, lat, lon) cube, constant in height and space."""
+    """A (time, plev, lat, lon) cube, constant in space.
+
+    ``series`` is constant in height unless ``profile`` (one weight per level
+    of ``PLEV``, which runs top-down from 1000 hPa as CMIP6 files do) shapes it.
+    """
     n_time = n_years * 12
     time = DimCoord(
         np.arange(n_time, dtype=float) * 30.0 + 15.0 + (start_year - 1850) * 360.0,
@@ -193,8 +206,10 @@ def _level_cube(
     values = np.full(n_time, value, dtype=float)
     if series is not None:
         values = values + np.asarray(series, dtype=float)
+    weights = np.ones(PLEV.size) if profile is None else np.asarray(profile, float)
+    offsets = values - value
     data = np.broadcast_to(
-        values[:, None, None, None],
+        (value + offsets[:, None] * weights[None, :])[:, :, None, None],
         (n_time, PLEV.size, LATS.size, LONS.size),
     ).astype(np.float32)
     return Cube(
@@ -205,59 +220,102 @@ def _level_cube(
     )
 
 
-def _buoyancy_cubes(seed: int = 5, n_years: int = 5) -> CubeList:
-    """pr responding to a uniform ta anomaly — but only inside 25S–25N."""
+def _buoyancy_cubes(
+    seed: int = 5,
+    *,
+    start_year: int = WINDOW[0],
+    n_years: int = 5,
+    outside_window_factor: float = 1.0,
+    zg: str | None = "flat",
+) -> CubeList:
+    """pr responding to a uniform ta anomaly — but only inside 25S–25N.
+
+    ``outside_window_factor`` scales the precipitation response in the years
+    outside the protocol window, so a gate that regressed the whole record
+    would recover a different slope. ``zg`` is ``"flat"`` (a constant
+    height), ``"wrong"`` (large noise correlated with the ta anomaly — what a
+    gate that still read the model's ``zg`` would see) or ``None`` (absent).
+    """
     rng = np.random.default_rng(seed)
     anomaly = rng.normal(0.0, 1.0, n_years * 12)
+    years = start_year + np.arange(n_years * 12) // 12
+    inside = (years >= WINDOW[0]) & (years <= WINDOW[1])
+    response = PR_PER_UNIT_TA * np.where(inside, 1.0, outside_window_factor)
     # 1 in the tropics, 5 outside: a global regression would see a steeper
     # slope than the 20S-20N one the protocol asks for
     weight = np.where(np.abs(LATS) <= 25.0, 1.0, 5.0)[:, None] * np.ones(LONS.size)
-    return CubeList(
-        [
-            _monthly_cube(
-                "pr",
-                3.0e-5,
-                "kg m-2 s-1",
-                n_years=n_years,
-                series=PR_PER_UNIT_TA * anomaly,
-                field=weight,
-            ),
-            _level_cube("ta", 250.0, "K", n_years=n_years, series=anomaly),
-            _level_cube("zg", 5000.0, "m", n_years=n_years),
-            _level_cube("hus", 0.005, "1", n_years=n_years),
-        ],
-    )
+    common = {"n_years": n_years, "start_year": start_year}
+    cubes = [
+        _monthly_cube(
+            "pr",
+            3.0e-5,
+            "kg m-2 s-1",
+            series=response * anomaly,
+            field=weight,
+            **common,
+        ),
+        _level_cube("ta", 250.0, "K", series=anomaly, **common),
+        _level_cube("hus", 0.005, "1", **common),
+    ]
+    if zg == "flat":
+        cubes.append(_level_cube("zg", 5000.0, "m", **common))
+    elif zg == "wrong":
+        noise = 500.0 * anomaly + 300.0 * rng.normal(0.0, 1.0, anomaly.size)
+        cubes.append(_level_cube("zg", 5000.0, "m", series=noise, **common))
+    return CubeList(cubes)
 
 
-def _expected_slope() -> float:
-    """mm/day per MJ/m² for the synthetic column (only c_p·ta varies)."""
-    d_pressure = PLEV.max() - PLEV.min()
-    d_column = (
-        physics.SPECIFIC_HEAT_DRY_AIR * d_pressure / physics.GRAVITY / 1.0e6
-    )  # MJ/m2 per K
+def _expected_slope(profile: np.ndarray | None = None) -> float:
+    """mm/day per MJ/m² for the synthetic column.
+
+    Only ``ta`` varies — uniformly in height, or shaped by ``profile`` — and
+    the geopotential is the hydrostatic one of that ``ta``, so ⟨h⟩ moves by
+    ``c_p·Δp/g`` plus the hypsometric ``R_d·T_v`` term per K.
+    """
+    weights = np.ones(PLEV.size) if profile is None else np.asarray(profile, float)
+
+    def column(temperature: float) -> float:
+        ta = 250.0 + (temperature - 250.0) * weights
+        hus = np.full(PLEV.size, 0.005)
+        z = physics.hydrostatic_height(ta, hus, PLEV)
+        mse = physics.moist_static_energy(ta, z, hus)
+        return float(physics.mass_weighted_column_integral(mse, PLEV))
+
+    d_column = (column(251.0) - column(250.0)) / 1.0e6  # MJ/m2 per K
     return PR_PER_UNIT_TA * physics.SECONDS_PER_DAY / d_column
 
 
 def _run_precip_buoyancy(
     monkeypatch: pytest.MonkeyPatch,
     reference: float | None,
+    cubes: CubeList | None = None,
 ):  # noqa: ANN201
-    def fake_observed_slope(_self, _levels=None) -> float:  # noqa: ANN001
+    def fake_observed_slope(_self, model, _levels=None):  # noqa: ANN001, ANN202
         if reference is None:
             msg = "no network in the test environment"
             raise RuntimeError(msg)
-        return reference
+        return reference, model
 
     monkeypatch.setattr(PrecipBuoyancyGate, "_observed_slope", fake_observed_slope)
     diag = PrecipBuoyancyGate("precip_buoyancy", fail_on_missing_data=False)
-    return diag.get_output({"historical": _buoyancy_cubes()}, _info())
+    data = _buoyancy_cubes() if cubes is None else cubes
+    return diag.get_output({"historical": data}, _info())
+
+
+def _raw(output) -> pd.Series:  # noqa: ANN001
+    return output.raw_output.to_pandas().bfill().iloc[0]
+
+
+def test_precip_buoyancy_window_is_the_papers() -> None:
+    """Paper Table 1 / App. B.3: the slope is taken over 1983–2014."""
+    assert tuple(get_threshold("tier1.precip_buoyancy.obs_window")) == WINDOW
 
 
 def test_precip_buoyancy_slope_is_the_tropical_pooled_regression(monkeypatch) -> None:  # noqa: ANN001
     """The recovered slope is the 20S–20N one, not the global one."""
     expected = _expected_slope()
     output = _run_precip_buoyancy(monkeypatch, expected / 1.1)
-    raw = output.raw_output.to_pandas().bfill().iloc[0]
+    raw = _raw(output)
     assert raw["precip_buoyancy_slope"] == pytest.approx(expected, rel=0.02)
     assert raw["precip_buoyancy_reference_from_obs"] == 1.0
     metrics = output.metrics.to_pandas().set_index("var_id")
@@ -279,24 +337,24 @@ def test_precip_buoyancy_integrates_the_reference_over_the_model_levels() -> Non
 
     Regression test: the observed slope was integrated over ERA5's 37
     levels while the model's used CMIP6 ``plev19``, and the pooled slope
-    depends strongly on that discretisation — the same ERA5 record gives
-    0.146 mm/day per MJ/m2 on 37 levels and 0.034 on ``plev19``, which by
-    itself accounted for the model/obs mismatch left after the date-pairing
-    fix.
+    appeared to depend strongly on that discretisation (0.146 mm/day per
+    MJ/m2 on 37 levels, 0.034 on ``plev19`` — an artefact of the
+    level-ordering bug tested below); the paper integrates the reference
+    over the submission's own levels regardless.
     """
     recorded: list[list[float] | None] = []
     gate = PrecipBuoyancyGate("precip_buoyancy", fail_on_missing_data=False)
     original = PrecipBuoyancyGate._slope  # noqa: SLF001
 
-    def record(self, pr, ta, zg, hus, levels=None):  # noqa: ANN001, ANN202
+    def record(self, pr, ta, hus, levels=None):  # noqa: ANN001, ANN202
         recorded.append(levels)
-        return original(self, pr, ta, zg, hus, levels)
+        return original(self, pr, ta, hus, levels)
 
     reference_levels: list[float] = []
 
-    def fake_observed_slope(_self, levels=None):  # noqa: ANN001, ANN202
+    def fake_observed_slope(_self, model, levels=None):  # noqa: ANN001, ANN202
         reference_levels.extend(levels or [])
-        return 1.0
+        return 1.0, model
 
     PrecipBuoyancyGate._slope = record  # noqa: SLF001
     try:
@@ -323,7 +381,6 @@ def test_precip_buoyancy_pairs_pr_and_the_column_by_calendar_month() -> None:
     anomaly = rng.normal(0.0, 1.0, n_column_years * 12)
     common = {"n_years": n_column_years, "start_year": 1979}
     ta = _level_cube("ta", 250.0, "K", series=anomaly, **common)
-    zg = _level_cube("zg", 5000.0, "m", **common)
     hus = _level_cube("hus", 0.005, "1", **common)
     # ...and a precipitation record that starts four years later, responding
     # to the *same* months of the column anomaly.
@@ -336,18 +393,225 @@ def test_precip_buoyancy_pairs_pr_and_the_column_by_calendar_month() -> None:
         series=PR_PER_UNIT_TA * anomaly[lag_years * 12 :],
     )
     gate = PrecipBuoyancyGate("precip_buoyancy", fail_on_missing_data=False)
-    slope = gate._slope(pr, ta, zg, hus)  # noqa: SLF001
+    slope = gate._slope(pr, ta, hus)  # noqa: SLF001
     assert slope == pytest.approx(_expected_slope(), rel=0.02)
+
+
+#: A ta anomaly that decays with height on the top-down ``PLEV``.
+BOTTOM_HEAVY = np.array([1.0, 0.6, 0.2, 0.0])
+
+
+def test_precip_buoyancy_pairs_each_level_with_its_own_pressure() -> None:
+    """The column integral must weight each level by its OWN pressure.
+
+    Regression test (2026-10-27): ``_column_mse`` passed the ascending sorted
+    level list to ``mass_weighted_column_integral`` as the pressure of each
+    level, but ``extract_levels`` keeps a file's own order when the levels
+    are a subset of its own, and CMIP6 and ERA5 files run top-down from
+    1000 hPa — so the 1000 hPa field was integrated as if it sat at the top
+    of the column. A height-uniform anomaly (every other test here) cannot
+    see that; one that decays with height gives a 25 % different column.
+    """
+    rng = np.random.default_rng(17)
+    anomaly = rng.normal(0.0, 1.0, 5 * 12)
+    common = {"n_years": 5, "start_year": WINDOW[0]}
+    ta = _level_cube("ta", 250.0, "K", series=anomaly, profile=BOTTOM_HEAVY, **common)
+    hus = _level_cube("hus", 0.005, "1", **common)
+    pr = _monthly_cube(
+        "pr",
+        3.0e-5,
+        "kg m-2 s-1",
+        series=PR_PER_UNIT_TA * anomaly,
+        **common,
+    )
+    gate = PrecipBuoyancyGate("precip_buoyancy", fail_on_missing_data=False)
+    slope = gate._slope(pr, ta, hus)  # noqa: SLF001
+    assert slope == pytest.approx(_expected_slope(BOTTOM_HEAVY), rel=0.02)
+    assert slope != pytest.approx(_expected_slope(), rel=0.05)
 
 
 def test_precip_buoyancy_without_a_reference_emits_the_model_slope(monkeypatch) -> None:  # noqa: ANN001
     """No observations and a null stored slope: report, do not gate."""
     output = _run_precip_buoyancy(monkeypatch, None)
-    raw = output.raw_output.to_pandas().bfill().iloc[0]
+    raw = _raw(output)
     assert raw["precip_buoyancy_slope"] == pytest.approx(_expected_slope(), rel=0.02)
     assert "precip_buoyancy_slope_rel_error" not in raw.index
     if output.metrics is not None:
         assert output.metrics.to_pandas().empty
+
+
+# -- one window, one month set, one column statistic ------------------------
+
+
+def _observations(
+    *,
+    era5_last_year: int = WINDOW[1],
+    seed: int = 21,
+) -> dict[str, Cube]:
+    """GPCP-like ``pr`` from 1983 and ERA5-like ``ta``/``hus`` from 1979."""
+    era5_years = era5_last_year - 1979 + 1
+    rng = np.random.default_rng(seed)
+    anomaly = rng.normal(0.0, 1.0, (WINDOW[1] - 1979 + 1) * 12)
+    gpcp_start = (WINDOW[0] - 1979) * 12
+    return {
+        "pr": _monthly_cube(
+            "pr",
+            3.0e-5,
+            "kg m-2 s-1",
+            n_years=WINDOW[1] - WINDOW[0] + 1,
+            start_year=WINDOW[0],
+            series=PR_PER_UNIT_TA * anomaly[gpcp_start:],
+        ),
+        "ta": _level_cube(
+            "ta",
+            250.0,
+            "K",
+            n_years=era5_years,
+            start_year=1979,
+            series=anomaly[: era5_years * 12],
+        ),
+        "hus": _level_cube("hus", 0.005, "1", n_years=era5_years, start_year=1979),
+    }
+
+
+#: The unpatched slope, so nested recorders never wrap one another.
+_PRECIP_BUOYANCY_SLOPE = PrecipBuoyancyGate._slope  # noqa: SLF001
+
+
+def _run_against_observations(
+    monkeypatch: pytest.MonkeyPatch,
+    cubes: CubeList,
+    observations: dict[str, Cube],
+) -> tuple[pd.Series, list[tuple[str, int]]]:
+    """Run the gate with the GPCP/ERA5 fetch replaced; record every slope's months."""
+    monkeypatch.setattr(
+        PrecipBuoyancyGate,
+        "_observation_cube",
+        lambda _self, _source, var_name: observations[var_name].copy(),
+    )
+    calls: list[tuple[str, int]] = []
+
+    def record(self, pr, ta, hus, levels=None):  # noqa: ANN001, ANN202
+        # the model is on the 2° grid; the patched observations stay on 10°
+        side = "reference" if pr.coord("latitude").points.size == LATS.size else "model"
+        calls.append((side, ta.coord("time").points.size))
+        return _PRECIP_BUOYANCY_SLOPE(self, pr, ta, hus, levels)
+
+    monkeypatch.setattr(PrecipBuoyancyGate, "_slope", record)
+    diag = PrecipBuoyancyGate("precip_buoyancy", fail_on_missing_data=False)
+    return _raw(diag.get_output({"historical": cubes}, _info())), calls
+
+
+def test_precip_buoyancy_regresses_the_model_over_the_reference_window(monkeypatch) -> None:  # noqa: ANN001
+    """A 1850–2100 record gives the slope of the same record cut to 1983–2014.
+
+    Regression test: the CLI hands Tier I the first member's FULL historical
+    record (sometimes spliced to 2100) and the gate regressed all of it,
+    against a reference taken over 1983–2014 only — on CNRM-CM6-1 that alone
+    moved the relative error from ≈ 0.17 to 0.32. Outside the window this
+    synthetic model's precipitation responds three times as strongly, so a
+    full-record regression would miss the in-window slope by a factor ~2.5.
+    """
+    full = _buoyancy_cubes(
+        start_year=1850,
+        n_years=2100 - 1850 + 1,
+        outside_window_factor=3.0,
+    )
+    pre_cut = CubeList(
+        [restrict_to_years(cube, *WINDOW) for cube in full],
+    )
+    raw_full, calls = _run_against_observations(monkeypatch, full, _observations())
+    raw_cut, _ = _run_against_observations(monkeypatch, pre_cut, _observations())
+
+    assert raw_full["precip_buoyancy_slope"] == pytest.approx(
+        raw_cut["precip_buoyancy_slope"],
+        rel=1e-9,
+    )
+    assert raw_full["precip_buoyancy_slope"] == pytest.approx(
+        _expected_slope(),
+        rel=0.02,
+    )
+    assert raw_full["precip_buoyancy_slope_ref"] == pytest.approx(
+        _expected_slope(),
+        rel=0.02,
+    )
+    assert raw_full["precip_buoyancy_slope_rel_error"] < 0.05  # noqa: PLR2004
+    n_months = (WINDOW[1] - WINDOW[0] + 1) * 12
+    assert raw_full["precip_buoyancy_n_months"] == n_months
+    first_last = ("precip_buoyancy_first_year", "precip_buoyancy_last_year")
+    assert tuple(raw_full[list(first_last)]) == WINDOW
+    # both sides regressed over the same 384 months (ERA5's 1979-1982 dropped)
+    assert sorted(calls) == [("model", n_months), ("reference", n_months)]
+
+
+def test_precip_buoyancy_uses_the_identical_month_set_on_both_sides(monkeypatch) -> None:  # noqa: ANN001
+    """A reference that ends early shortens the model's regression too."""
+    full = _buoyancy_cubes(start_year=1850, n_years=2100 - 1850 + 1)
+    raw, calls = _run_against_observations(
+        monkeypatch,
+        full,
+        _observations(era5_last_year=2010),
+    )
+    n_months = (2010 - WINDOW[0] + 1) * 12
+    assert raw["precip_buoyancy_n_months"] == n_months
+    assert raw["precip_buoyancy_last_year"] == 2010.0  # noqa: PLR2004
+    assert sorted(calls) == [("model", n_months), ("reference", n_months)]
+
+
+def test_precip_buoyancy_keeps_the_window_with_the_stored_reference(monkeypatch) -> None:  # noqa: ANN001
+    """No observations, a stored slope: the model is still cut to 1983–2014."""
+    from climatebench2.diags import tier1_extended
+
+    stored = _expected_slope() / 1.1
+    real = tier1_extended.get_threshold
+
+    def thresholds(path: str):  # noqa: ANN202
+        if path == "tier1.precip_buoyancy.reference_slope":
+            return stored
+        return real(path)
+
+    monkeypatch.setattr(tier1_extended, "get_threshold", thresholds)
+    full = _buoyancy_cubes(
+        start_year=1850,
+        n_years=2100 - 1850 + 1,
+        outside_window_factor=3.0,
+    )
+    raw = _raw(_run_precip_buoyancy(monkeypatch, None, full))
+    assert raw["precip_buoyancy_reference_from_obs"] == 0.0
+    assert raw["precip_buoyancy_slope_ref"] == pytest.approx(stored)
+    assert raw["precip_buoyancy_slope"] == pytest.approx(_expected_slope(), rel=0.02)
+    assert raw["precip_buoyancy_n_months"] == (WINDOW[1] - WINDOW[0] + 1) * 12
+
+
+def test_precip_buoyancy_builds_the_geopotential_hydrostatically_on_both_sides(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """A model's own ``zg`` never enters the column: wrong or absent, same slope.
+
+    Regression test: the reference column used a hydrostatic geopotential
+    (ClimateEval's ERA5 mapping has no ``zg``) while the model used its
+    published ``zg`` — on CNRM-CM6-1 a +27 % move of the model slope while
+    the level-ordering bug was present. Both sides now build ``g·z`` from
+    their own ``ta``/``hus``.
+    """
+    reference = _expected_slope()
+    slopes = {
+        zg: _raw(
+            _run_precip_buoyancy(monkeypatch, reference, _buoyancy_cubes(zg=zg)),
+        )["precip_buoyancy_slope"]
+        for zg in ("flat", "wrong", None)
+    }
+    assert slopes["wrong"] == pytest.approx(slopes["flat"], rel=1e-9)
+    assert slopes[None] == pytest.approx(slopes["flat"], rel=1e-9)
+    assert slopes[None] == pytest.approx(reference, rel=0.02)
+
+
+def test_restrict_to_years_refuses_a_record_outside_the_window() -> None:
+    cube = _monthly_cube("pr", 3.0e-5, "kg m-2 s-1", n_years=5, start_year=1850)
+    with pytest.raises(ValueError, match="no month in 1983-2014"):
+        restrict_to_years(cube, *WINDOW)
+    inside = restrict_to_years(cube, 1851, 1852)
+    assert inside.coord("time").points.size == 24  # noqa: PLR2004
 
 
 # ---------------------------------------------------------------------------

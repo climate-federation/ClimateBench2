@@ -41,7 +41,7 @@
   diagnostic: climatebench2.diags.ClearSkyFeedbackGate
   additional_diagnostic_kwargs: {}
 
-- name: precip_buoyancy               # I.3c — historical (pr + ta/zg/hus)
+- name: precip_buoyancy               # I.3c — historical (pr + ta/hus), 1983-2014
   diagnostic: climatebench2.diags.PrecipBuoyancyGate
   additional_diagnostic_kwargs: {}
 

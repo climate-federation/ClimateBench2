@@ -85,25 +85,30 @@ tier1:
     tier: I
     requirement: required
     rel_tolerance_vs_obs: 0.30         # slope within ±30% of GPCP/ERA5
-    # Satellite-era window the observational reference slope is taken over
-    # (GPCP starts 1979; never post-2015, which is the reserved test window).
-    obs_window: [1979, 2014]
+    # The ONE window of I.3c (paper Table 1 and App. B.3: "over 1983-2014, the
+    # period of the GPCP/ERA5 reference"): the reference slope AND the model
+    # slope are both regressed over it, on the identical set of calendar
+    # months (the model is never regressed over its full historical record).
+    # 1983 is where GPCP v3.3 as staged begins. Until 2026-10-27 this read
+    # [1979, 2014] and bounded the reference only: the month pairing already
+    # cut ERA5 to GPCP's 1983 start, but the model was regressed over its
+    # whole record. Never post-2015, which is the reserved test window.
+    obs_window: [1983, 2014]
     # Reference slope of P' (mm/day) on column-MSE' (MJ m-2) from GPCP + ERA5
     # over `obs_window`. `PrecipBuoyancyGate` computes it at run time when the
     # observations are obtainable; this key is the stored fallback so a run
     # without network access still gates.
     #
-    # DELIBERATELY null (2026-09-20), no longer a TODO. The reference column
-    # has to be integrated over the SUBMISSION's own level set, because the
-    # observed slope is a strong function of the discretisation: on the staged
-    # ERA5 over 20S-20N, 1983-2014, it is 0.14637 mm/day per MJ/m2 (r = 0.42)
-    # on ERA5's own 37 levels and 0.03403 (r = 0.11) on CMIP6 plev19. A stored
-    # constant can therefore only ever be right for one level set, so it
-    # cannot be pinned model-independently; the run-time reference is the
-    # right path, and the gate emits `precip_buoyancy_n_levels` so a row can
-    # be read without guessing which discretisation produced it.
-    # What IS still open for Duncan is the bound above, not this value:
-    # see "Decisions needed from Duncan" E.4 in docs/metrics_reference.md.
+    # null (2026-09-20). It was left null because the observed slope looked
+    # like a strong function of the level set (0.14637 mm/day per MJ/m2 on
+    # ERA5's 37 levels, 0.03403 on CMIP6 plev19), so no constant could be
+    # model-independent. That dependence was a level-ordering bug in the
+    # column integral (fixed 2026-10-27): with it fixed the same staged ERA5
+    # over 20S-20N, 1983-2014 gives 0.1162 on 37 levels and 0.1166 on plev19
+    # (r = 0.48). Whether to pin a stored value now is open for Duncan
+    # (decision E.4 in docs/metrics_reference.md); the run-time reference on
+    # the submission's own levels (paper App. B.3) stays the primary path,
+    # and the gate emits `precip_buoyancy_n_levels`.
     reference_slope: null
 
   # I.4a GFMIP SST patch experiments

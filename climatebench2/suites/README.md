@@ -70,7 +70,10 @@ clipped to the staged record per product, which is why I.3c pairs its model and
 reference fields on **calendar months** (`align_on_common_months`): GPCP starts
 in 1983 and ERA5 in 1979, and cutting both to the shorter length from the start
 regressed 1983–2014 precipitation on 1979–2010 buoyancy — a four-year offset
-that produced a *negative* observed precipitation–buoyancy slope.
+that produced a *negative* observed precipitation–buoyancy slope. I.3c's window
+(1983–2014, paper App. B.3) also bounds the **model**: its fields are cut to it
+and then to the months the six model and reference fields share, so both slopes
+are regressed over one month set.
 
 Two Tier II entries deliberately reach **back past the suite's test-window cut**,
 by loading their reference through a copy of the `Variable` carrying a different
