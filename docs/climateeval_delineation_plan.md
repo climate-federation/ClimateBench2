@@ -420,7 +420,7 @@ staged root, so the CB2-side gap they were opened to close is still open: ERA5 `
 | #45 | hist-aer / amip / amip-4xCO2 / lgm / midHolocene / lig127k generators | data source | Merged, **no pool staged** |
 | #46 | `Nino34` accepting `window_length = 1` | diagnostic fix | **Yes** — `ENSOGate._preprocess` deleted (`224a133`) |
 | #47 | `SeaIceExtent*` diagnostics (15 % threshold) | generic diagnostic | **Yes** — the sea-ice stanzas score extent (`b9f4952`) |
-| #48 | ERA5 `zg` / `ts` | data source | Merged, **not staged** (CDS download); Tier II no longer scores `ts` (dropped 2026-10-27), I.3c keeps its hydrostatic fallback |
+| #48 | ERA5 `zg` / `ts` | data source | Merged, **not staged** (CDS download); Tier II no longer scores `ts` (dropped 2026-10-27). I.3c no longer needs it: since 2026-10-27 it builds a hydrostatic geopotential on **both** sides, model and ERA5 |
 | #49 | GISTEMP / BerkeleyEarth / NOAAGlobalTemp / CRU sources (+ the `tasa` variable) | data source | Merged, **not staged** |
 | #50 | Tier I energy-budget/covariance diagnostics — `EnergyBalance`, `BudgetClosure`, `ClearSkyLongwaveFeedback`, `PrecipitationBuoyancy`, `ClausiusClapeyronScaling` | generic physics **out of CB2** | Merged; CB2 copies **not retired** (needs the pin, needs the upstream merge) |
 | #51 | dynamics/variability — `GeostrophicBalance`, `MJOEastWestPowerRatio`, `ITCZEnergyFluxEquator`, `BjerknesCompensation`, `ENSOTeleconnectionPatterns` | generic physics **out of CB2** | Same. ⚠ CB2's I.3b/I.3c were fixed on 2026-09-20 *after* this PR was opened; carry those fixes upstream first |
