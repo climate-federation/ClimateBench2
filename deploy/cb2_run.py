@@ -22,9 +22,10 @@ What must be identical between submissions (window, suites, bundle URIs) is
 the *profile* (``deploy/profiles/<name>.yml``), recorded in ``run.json`` with
 the software versions so every result says what it was scored against.
 
-URIs: ``s3://`` goes through ``s5cmd`` (the pod's IAM role), ``gs://`` is read
-anonymously over the public JSON API (``gs://climatebench`` is public-read;
-writing to GCS is not supported), and anything else is a local path. Only the
+URIs: ``s3://`` goes through ``s5cmd`` (the pod's IAM role); ``gs://`` is read
+anonymously over the public JSON API (``gs://climatebench`` is public-read)
+and written through GCS's S3-compatible API with an HMAC key; anything else is
+a local path. Results default to ``gs://climatebench/v2/results/``. Only the
 standard library is used here; ``climatebench2`` runs as a subprocess in the
 image's pixi environment.
 """
@@ -153,16 +154,31 @@ def fetch(uri: str, dest: Path, *, workers: int = 16) -> Path:
 
 
 def upload(src: Path, uri: str) -> None:
-    """Copy ``src`` to ``uri`` (s3:// or a local directory)."""
+    """Copy ``src`` to ``uri`` (gs://, s3:// or a local directory).
+
+    ``gs://`` goes through GCS's S3-compatible XML API with an HMAC key of a
+    service account that may write the results prefix, passed as
+    ``$GCS_HMAC_ACCESS_ID`` / ``$GCS_HMAC_SECRET`` (a Kubernetes Secret).
+    """
     scheme, bucket, prefix = split_uri(uri)
-    if scheme == "gs":
-        msg = "uploading to gs:// is not supported from the pod; use an s3:// or local output URI"
-        raise SystemExit(msg)
     if not scheme:
         shutil.copytree(src, Path(prefix), dirs_exist_ok=True)
         return
     prefix = prefix.rstrip("/")
-    subprocess.run(["s5cmd", "cp", f"{src}/", f"s3://{bucket}/{prefix}/"], check=True)
+    cmd = ["s5cmd"]
+    env = None
+    if scheme == "gs":
+        try:
+            env = os.environ | {
+                "AWS_ACCESS_KEY_ID": os.environ["GCS_HMAC_ACCESS_ID"],
+                "AWS_SECRET_ACCESS_KEY": os.environ["GCS_HMAC_SECRET"],
+                "AWS_REGION": "auto",
+            }
+        except KeyError as err:
+            msg = f"writing to gs:// needs {err.args[0]} (a GCS HMAC key for the results bucket)"
+            raise SystemExit(msg) from err
+        cmd += ["--endpoint-url", "https://storage.googleapis.com"]
+    subprocess.run([*cmd, "cp", f"{src}/", f"s3://{bucket}/{prefix}/"], check=True, env=env)
 
 
 def verify_manifest(root: Path, *, workers: int = 8) -> int:
@@ -261,9 +277,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--model-uri", required=True, help="Submission root (s3://, gs:// or a local path).")
     p.add_argument("--name", required=True, help="Model name recorded in the results.")
-    p.add_argument("--output-uri", required=True, help="Where the result directory is uploaded (s3:// or local).")
+    p.add_argument(
+        "--output-uri",
+        help="Where the result directory is uploaded (gs://, s3:// or local; default: the profile's results_uri).",
+    )
     p.add_argument("--profile", default=os.environ.get("CB2_PROFILE", "v2"), help="Profile name or YAML path.")
-    p.add_argument("--references-uri", help="Override the profile's reference bundle (e.g. an S3 mirror).")
+    p.add_argument("--references-uri", help="Override the profile's reference bundle URI.")
     p.add_argument("--comparison-uri", help="Override the profile's frozen comparison bundle.")
     p.add_argument("--workdir", type=Path, default=Path(os.environ.get("CB2_WORKDIR", "/scratch")))
     p.add_argument("--suite", action="append", help="Run only these suites (repeatable; default: the profile's).")
@@ -277,6 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
     args = build_parser().parse_args(argv)
     profile = load_profile(args.profile)
+    args.output_uri = args.output_uri or profile["results_uri"]
     started = dt.datetime.now(dt.UTC)
     work = args.workdir
     out_dir = work / "out" / args.name

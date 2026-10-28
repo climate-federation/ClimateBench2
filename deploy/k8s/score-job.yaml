@@ -38,17 +38,25 @@ spec:
             - /opt/cb2/cb2_run.py
             - --model-uri=<MODEL_URI>
             - --name=<MODEL_NAME>
-            - --output-uri=<OUTPUT_URI>
             - --profile=v2
-            # Read the bundles from an S3 mirror in the cluster's region
-            # instead of the public GCS bucket (avoids cross-cloud egress):
-            # - --references-uri=s3://<BUCKET>/v2/references/
-            # - --comparison-uri=s3://<BUCKET>/v2/comparison/
+            # Results go to the profile's results_uri
+            # (gs://climatebench/v2/results/<name>/<timestamp>/) unless
+            # overridden with --output-uri.
           env:
             - name: CB2_IMAGE
               value: ghcr.io/climate-federation/climatebench2:<IMAGE_TAG>
             - name: DASK_NUM_WORKERS
               value: "8"
+            # HMAC key of a GCP service account with object create rights on
+            # gs://climatebench/v2/results/ (kubectl -n climatebench create
+            # secret generic cb2-gcs-hmac --from-literal=access_id=...
+            # --from-literal=secret=...).
+            - name: GCS_HMAC_ACCESS_ID
+              valueFrom:
+                secretKeyRef: {name: cb2-gcs-hmac, key: access_id}
+            - name: GCS_HMAC_SECRET
+              valueFrom:
+                secretKeyRef: {name: cb2-gcs-hmac, key: secret}
           resources:
             requests:
               cpu: "8"

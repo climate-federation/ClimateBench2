@@ -8,12 +8,12 @@ description: >-
   2015-2025, clipped per variable to the last complete year of its reference
   (HadCRUT5 2022, GPCP 2023, CERES-EBAF and IMERG 2024, HadISST 2025).
 
-# Object-storage locations. gs:// URIs are read anonymously (the bucket is
-# public); s3:// URIs use the pod's IAM role. Override per run with
-# --references-uri / --comparison-uri (e.g. an S3 mirror in the cluster's
-# region).
+# Object-storage locations. The bundles are read anonymously from the public
+# bucket; results are written there with a GCS HMAC key (cb2_run.upload).
+# Override per run with --references-uri / --comparison-uri / --output-uri.
 references_uri: gs://climatebench/v2/references/
 comparison_uri: gs://climatebench/v2/comparison/
+results_uri: gs://climatebench/v2/results/
 
 # Verify every reference file against MANIFEST.json before scoring.
 verify_references: true

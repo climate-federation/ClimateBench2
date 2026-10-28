@@ -19,9 +19,10 @@ exactly.
 | Frozen comparison bundle `v2` (`*.ddb`, `manifest.json`) | `gs://climatebench/v2/comparison/` | <0.1 GB |
 | The submission | any `s3://` prefix | 10–300 GB |
 
-`gs://climatebench` is public-read and is fetched anonymously. For EKS, mirror
-both bundles to S3 in the cluster's region and pass `--references-uri` /
-`--comparison-uri`. This avoids paying cross-cloud egress on every run.
+`gs://climatebench` is public-read, so both bundles are fetched anonymously.
+Results are written to `gs://climatebench/v2/results/<name>/<UTC timestamp>/`
+through GCS's S3-compatible API. That needs an HMAC key for a service account
+that may create objects there, stored as the Kubernetes Secret `cb2-gcs-hmac`.
 
 ## Submission layout
 
@@ -69,10 +70,12 @@ On EKS:
 
 ```bash
 kubectl apply -f deploy/k8s/base.yaml          # namespace + IRSA service account (edit the role ARN)
-deploy/submit.sh MyModel s3://subs/MyModel/ s3://cb2-results/ main
+kubectl -n climatebench create secret generic cb2-gcs-hmac \
+    --from-literal=access_id=GOOG1E... --from-literal=secret=...
+deploy/submit.sh MyModel s3://subs/MyModel/ main
 ```
 
-Each run uploads `<output-uri>/<name>/<UTC timestamp>/`, which contains:
+Each run uploads `gs://climatebench/v2/results/<name>/<UTC timestamp>/` (or `--output-uri`), which contains:
 - one `.ddb` per suite;
 - `leaderboard.html` and `scores.csv`;
 - `score.log`;
