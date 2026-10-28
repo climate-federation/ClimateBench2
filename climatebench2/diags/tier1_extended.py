@@ -652,6 +652,10 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     _band: ClassVar[tuple[float, float]] = (-20.0, 20.0)
     #: J/m² → MJ/m², so the reported slope is O(0.1–1).
     _mse_scale: ClassVar[float] = 1.0e6
+    #: Relative tolerance for "the same pressure level" across products: a
+    #: numerical-representation tolerance, not a protocol bound (ACCESS-CM2's
+    #: plev19 is 100000.00000001 Pa where ERA5 has 100000).
+    _level_rtol: ClassVar[float] = 1.0e-6
 
     _gate_checks = (
         GateCheck(
@@ -680,13 +684,50 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         cube = get_prepared_cube(data, _mon(name))
         return self._regridded(restrict_to_years(cube, *self._protocol_years()))
 
-    @staticmethod
-    def _common_levels(ta: Cube, hus: Cube) -> list[float]:
-        """The pressure levels both profiles carry (Pa, ascending)."""
-        levels = sorted(
-            set(ta.coord("air_pressure").points.astype(float))
-            & set(hus.coord("air_pressure").points.astype(float)),
+    @classmethod
+    def _match_level(cls, level: float, candidates: np.ndarray) -> int | None:
+        """Index of the candidate within ``_level_rtol`` of ``level``, if any."""
+        close = np.flatnonzero(
+            np.isclose(candidates, level, rtol=cls._level_rtol, atol=0.0),
         )
+        return int(close[0]) if close.size else None
+
+    @classmethod
+    def _snap_levels(cls, cube: Cube, levels: list[float]) -> None:
+        """Give ``cube``'s pressure points within tolerance of ``levels`` those values.
+
+        In place, on a cube the gate created itself (a regrid output): the
+        submission's level values become the common vocabulary, so the
+        ``extract_levels`` that follows takes them by exact match instead of
+        interpolating to a level 1e-8 Pa away — which ESMValCore treats as
+        outside the source range and fills with NaN.
+        """
+        coord = cube.coord("air_pressure")
+        points = coord.points.astype(float).copy()
+        targets = np.asarray(levels, dtype=float)
+        for index, point in enumerate(points):
+            match = cls._match_level(point, targets)
+            if match is not None:
+                points[index] = targets[match]
+        if not np.array_equal(points, coord.points):
+            coord.points = points.astype(coord.dtype)
+
+    @classmethod
+    def _common_levels(cls, ta: Cube, hus: Cube) -> list[float]:
+        """The pressure levels both profiles carry (Pa, ascending, ``ta``'s values).
+
+        Matched within ``_level_rtol``, and ``hus`` is snapped onto ``ta``'s
+        values, so a representation offset between the two files cannot
+        empty the set.
+        """
+        ta_points = ta.coord("air_pressure").points.astype(float)
+        hus_points = hus.coord("air_pressure").points.astype(float)
+        levels = sorted(
+            float(level)
+            for level in ta_points
+            if cls._match_level(level, hus_points) is not None
+        )
+        cls._snap_levels(hus, levels)
         if len(levels) < 2:  # noqa: PLR2004
             msg = (
                 f"need at least two common pressure levels for the column "
@@ -694,6 +735,85 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
             )
             raise ValueError(msg)
         return levels
+
+    def _levels_with_data(
+        self,
+        ta: Cube,
+        hus: Cube,
+        levels: list[float],
+        side: str,
+    ) -> tuple[list[float], dict[float, str]]:
+        """(the ``levels`` on which ``ta`` AND ``hus`` hold data, {dropped: why}).
+
+        A level is dropped when either field is entirely missing on it —
+        all-NaN or masked over 20S–20N and every month passed in — after
+        being put on ``levels`` exactly as the column integral will put it.
+        One such level makes the trapezoid NaN in every column (CAMS-CSM1-0,
+        GFDL-CM4 and INM-CM4-8 publish nothing at 1 or 5 hPa), so it is left
+        out rather than allowed to void the statistic. A level that is only
+        partly missing (sub-surface 1000 hPa points) is kept: those columns
+        drop out of the pooled regression as before.
+        """
+        present: dict[float, bool] = dict.fromkeys(levels, True)
+        for cube in (ta, hus):
+            with setup_esmvaltool_config_and_logging():
+                cube = extract_levels(self._tropical_band(cube), levels, "linear")
+            axis = cube.coord_dims("air_pressure")[0]
+            finite = np.isfinite(_filled(cube.data))
+            others = tuple(i for i in range(finite.ndim) if i != axis)
+            has_data = finite.any(axis=others)
+            for level, ok in zip(
+                cube.coord("air_pressure").points.astype(float),
+                has_data,
+                strict=True,
+            ):
+                index = self._match_level(level, np.asarray(levels, dtype=float))
+                if index is not None and not ok:
+                    present[levels[index]] = False
+        kept = [level for level in levels if present[level]]
+        dropped = {
+            level: f"no {side} ta/hus data over 20S-20N"
+            for level in levels
+            if not present[level]
+        }
+        return kept, dropped
+
+    def _reference_levels(
+        self,
+        ta: Cube,
+        hus: Cube,
+        levels: list[float],
+    ) -> tuple[list[float], dict[float, str]]:
+        """The submission's ``levels`` the reference can be put on, and the rest.
+
+        The reference's own points are snapped onto the submission's values
+        (within ``_level_rtol``); a level outside the reference's pressure
+        range is dropped (ICON-ESM-LR's 3, 5 and 7 Pa lie above ERA5's 1 hPa
+        top, and ``extract_levels`` returns NaN there), and so is one the
+        reference has no data on. Levels inside the range that ERA5 does not
+        carry are interpolated, as before.
+        """
+        for cube in (ta, hus):
+            self._snap_levels(cube, levels)
+        points = np.concatenate(
+            [c.coord("air_pressure").points.astype(float) for c in (ta, hus)],
+        )
+        low = max(c.coord("air_pressure").points.min() for c in (ta, hus))
+        high = min(c.coord("air_pressure").points.max() for c in (ta, hus))
+        inside = [
+            level
+            for level in levels
+            if (low <= level <= high) or self._match_level(level, points) is not None
+        ]
+        dropped = {
+            level: "outside the reference's pressure range"
+            for level in levels
+            if level not in inside
+        }
+        if len(inside) < 2:  # noqa: PLR2004
+            return inside, dropped
+        kept, missing = self._levels_with_data(ta, hus, inside, "reference")
+        return kept, {**dropped, **missing}
 
     def _column_mse(
         self,
@@ -797,15 +917,18 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     def _observed_slope(
         self,
         model: tuple[Cube, Cube, Cube],
-        levels: list[float] | None = None,
-    ) -> tuple[float, tuple[Cube, Cube, Cube]]:
-        """(GPCP/ERA5 reference slope, the model fields on the same months).
+        levels: list[float],
+    ) -> tuple[float, tuple[Cube, Cube, Cube], list[float], dict[float, str]]:
+        """(GPCP/ERA5 slope, model fields on its months, levels used, dropped).
 
         ``model`` is the submission's ``(pr, ta, hus)`` already cut to the
         protocol window. All six fields are cut to the calendar months every
         one of them has, so the reference and the model are regressed over
         the identical month set — a reference product that ends early, or a
-        model record with a gap, shortens both sides alike.
+        model record with a gap, shortens both sides alike. ``levels`` (the
+        submission's usable levels) are narrowed to those the reference can
+        also be put on (:meth:`_reference_levels`); the caller integrates
+        the model over the same narrowed set.
         """
         observed = (
             self._observation_cube(GPCP, "pr"),
@@ -814,17 +937,34 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         )
         aligned = align_on_common_months(*model, *observed)
         pr, ta, hus = aligned[3:]
-        return self._slope(pr, ta, hus, levels), (aligned[0], aligned[1], aligned[2])
+        levels, dropped = self._reference_levels(ta, hus, levels)
+        if len(levels) < 2:  # noqa: PLR2004
+            msg = f"the reference shares fewer than two levels with the model: {levels}"
+            raise ValueError(msg)
+        return (
+            self._slope(pr, ta, hus, levels),
+            (aligned[0], aligned[1], aligned[2]),
+            levels,
+            dropped,
+        )
 
     def _reference_slope(
         self,
         model: tuple[Cube, Cube, Cube],
-        levels: list[float] | None = None,
-    ) -> tuple[float | None, bool, tuple[Cube, Cube, Cube]]:
-        """(reference slope, whether it came from the observations, model fields).
+        levels: list[float],
+    ) -> tuple[
+        float | None,
+        bool,
+        tuple[Cube, Cube, Cube],
+        list[float],
+        dict[float, str],
+    ]:
+        """(reference slope, from observations?, model fields, levels, dropped).
 
-        The model fields come back cut to the months the reference used, or
-        unchanged (the protocol window) when the stored fallback is used.
+        The model fields come back cut to the months the reference used, and
+        the levels narrowed to those the reference also carries; with the
+        stored fallback both come back unchanged (the protocol window, the
+        submission's usable levels).
 
         ``levels`` are the **model's** pressure levels: the column integral
         is a trapezoid over whatever levels the data carry, so the paper
@@ -835,7 +975,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         with it fixed the two give 0.1166 and 0.1162.)
         """
         try:
-            reference, model = self._observed_slope(model, levels)
+            reference, model, used, dropped = self._observed_slope(model, levels)
         except Exception as exc:
             if self._fail_on_missing_data:
                 raise
@@ -845,7 +985,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
                 f"tier1.precip_buoyancy.reference_slope",
             )
         else:
-            return reference, True, model
+            return reference, True, model, used, dropped
         stored = get_threshold("tier1.precip_buoyancy.reference_slope")
         if stored is None:
             logger.warning(
@@ -853,8 +993,8 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
                 f"reference_slope is null, so I.3c reports the model slope "
                 f"without a gate row",
             )
-            return None, False, model
-        return float(stored), False, model
+            return None, False, model, levels, {}
+        return float(stored), False, model, levels, {}
 
     def _calculate_raw_output(
         self,
@@ -864,17 +1004,36 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         pr, ta, hus = (
             self._model_cube(historical, name) for name in ("pr", "ta", "hus")
         )
-        levels = self._common_levels(ta, hus)
         model = align_on_common_months(pr, ta, hus)
-        reference, from_observations, model = self._reference_slope(
+        # One level set for both sides: the levels the submission carries
+        # (matched within tolerance), minus any it has no data on, minus any
+        # the reference cannot be put on or has no data on.
+        levels = self._common_levels(model[1], model[2])
+        levels, dropped = self._levels_with_data(model[1], model[2], levels, "model")
+        if len(levels) < 2:  # noqa: PLR2004
+            msg = f"the model has data on fewer than two levels: {levels}"
+            raise ValueError(msg)
+        reference, from_observations, model, levels, more = self._reference_slope(
             (model[0], model[1], model[2]),
             levels,
         )
+        dropped.update(more)
+        if dropped:
+            listed = ", ".join(
+                f"{level:g} Pa ({why})" for level, why in sorted(dropped.items())
+            )
+            logger.warning(
+                f"Diagnostic '{self.name}': I.3c integrates both columns over "
+                f"{len(levels)} levels; dropped {listed}",
+            )
         slope = self._slope(*model, levels)
         years, _months = _cube_years_months(model[0])
         values = {
             "precip_buoyancy_slope": slope,
             "precip_buoyancy_n_levels": float(len(levels)),
+            "precip_buoyancy_levels_dropped": float(len(dropped)),
+            "precip_buoyancy_top_level_pa": float(min(levels)),
+            "precip_buoyancy_bottom_level_pa": float(max(levels)),
             "precip_buoyancy_n_months": float(years.size),
             "precip_buoyancy_first_year": float(years.min()),
             "precip_buoyancy_last_year": float(years.max()),

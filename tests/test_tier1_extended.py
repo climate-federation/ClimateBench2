@@ -186,11 +186,15 @@ def _level_cube(
     series: np.ndarray | None = None,
     start_year: int = 1850,
     profile: np.ndarray | None = None,
+    plev: np.ndarray = PLEV,
+    missing_levels: tuple[int, ...] = (),
 ) -> Cube:
     """A (time, plev, lat, lon) cube, constant in space.
 
     ``series`` is constant in height unless ``profile`` (one weight per level
-    of ``PLEV``, which runs top-down from 1000 hPa as CMIP6 files do) shapes it.
+    of ``plev``, which runs top-down from 1000 hPa as CMIP6 files do) shapes
+    it. The levels at ``missing_levels`` are masked everywhere, as CMIP6
+    publishes a level a model does not resolve.
     """
     n_time = n_years * 12
     time = DimCoord(
@@ -198,7 +202,8 @@ def _level_cube(
         standard_name="time",
         units=Unit("days since 1850-01-01", calendar="360_day"),
     )
-    plev = DimCoord(PLEV, standard_name="air_pressure", units="Pa")
+    levels = np.asarray(plev, dtype=float)
+    plev = DimCoord(levels, standard_name="air_pressure", units="Pa")
     lat = DimCoord(LATS, standard_name="latitude", units="degrees")
     lon = DimCoord(LONS, standard_name="longitude", units="degrees", circular=True)
     for coord in (time, lat, lon):
@@ -206,14 +211,16 @@ def _level_cube(
     values = np.full(n_time, value, dtype=float)
     if series is not None:
         values = values + np.asarray(series, dtype=float)
-    weights = np.ones(PLEV.size) if profile is None else np.asarray(profile, float)
+    weights = np.ones(levels.size) if profile is None else np.asarray(profile, float)
     offsets = values - value
     data = np.broadcast_to(
         (value + offsets[:, None] * weights[None, :])[:, :, None, None],
-        (n_time, PLEV.size, LATS.size, LONS.size),
+        (n_time, levels.size, LATS.size, LONS.size),
     ).astype(np.float32)
+    mask = np.zeros(data.shape, dtype=bool)
+    mask[:, list(missing_levels)] = True
     return Cube(
-        data.copy(),
+        np.ma.masked_array(data.copy(), mask=mask),
         var_name=var_name,
         units=units,
         dim_coords_and_dims=[(time, 0), (plev, 1), (lat, 2), (lon, 3)],
@@ -265,21 +272,24 @@ def _buoyancy_cubes(
     return CubeList(cubes)
 
 
-def _expected_slope(profile: np.ndarray | None = None) -> float:
+def _expected_slope(
+    profile: np.ndarray | None = None,
+    plev: np.ndarray = PLEV,
+) -> float:
     """mm/day per MJ/m² for the synthetic column.
 
     Only ``ta`` varies — uniformly in height, or shaped by ``profile`` — and
     the geopotential is the hydrostatic one of that ``ta``, so ⟨h⟩ moves by
     ``c_p·Δp/g`` plus the hypsometric ``R_d·T_v`` term per K.
     """
-    weights = np.ones(PLEV.size) if profile is None else np.asarray(profile, float)
+    weights = np.ones(plev.size) if profile is None else np.asarray(profile, float)
 
     def column(temperature: float) -> float:
         ta = 250.0 + (temperature - 250.0) * weights
-        hus = np.full(PLEV.size, 0.005)
-        z = physics.hydrostatic_height(ta, hus, PLEV)
+        hus = np.full(plev.size, 0.005)
+        z = physics.hydrostatic_height(ta, hus, plev)
         mse = physics.moist_static_energy(ta, z, hus)
-        return float(physics.mass_weighted_column_integral(mse, PLEV))
+        return float(physics.mass_weighted_column_integral(mse, plev))
 
     d_column = (column(251.0) - column(250.0)) / 1.0e6  # MJ/m2 per K
     return PR_PER_UNIT_TA * physics.SECONDS_PER_DAY / d_column
@@ -294,7 +304,7 @@ def _run_precip_buoyancy(
         if reference is None:
             msg = "no network in the test environment"
             raise RuntimeError(msg)
-        return reference, model
+        return reference, model, _levels, {}
 
     monkeypatch.setattr(PrecipBuoyancyGate, "_observed_slope", fake_observed_slope)
     diag = PrecipBuoyancyGate("precip_buoyancy", fail_on_missing_data=False)
@@ -354,7 +364,7 @@ def test_precip_buoyancy_integrates_the_reference_over_the_model_levels() -> Non
 
     def fake_observed_slope(_self, model, levels=None):  # noqa: ANN001, ANN202
         reference_levels.extend(levels or [])
-        return 1.0, model
+        return 1.0, model, levels, {}
 
     PrecipBuoyancyGate._slope = record  # noqa: SLF001
     try:
@@ -604,6 +614,105 @@ def test_precip_buoyancy_builds_the_geopotential_hydrostatically_on_both_sides(
     assert slopes["wrong"] == pytest.approx(slopes["flat"], rel=1e-9)
     assert slopes[None] == pytest.approx(slopes["flat"], rel=1e-9)
     assert slopes[None] == pytest.approx(reference, rel=0.02)
+
+
+# -- the level set both sides actually carry --------------------------------
+
+
+def _model_on(
+    plev: np.ndarray,
+    *,
+    missing_levels: tuple[int, ...] = (),
+) -> CubeList:
+    """A 1983–2014 model on ``plev``; pr follows the height-uniform ta anomaly."""
+    n_years = WINDOW[1] - WINDOW[0] + 1
+    anomaly = np.random.default_rng(5).normal(0.0, 1.0, n_years * 12)
+    common = {
+        "n_years": n_years,
+        "start_year": WINDOW[0],
+        "plev": plev,
+        "missing_levels": missing_levels,
+    }
+    return CubeList(
+        [
+            _monthly_cube(
+                "pr",
+                3.0e-5,
+                "kg m-2 s-1",
+                n_years=n_years,
+                start_year=WINDOW[0],
+                series=PR_PER_UNIT_TA * anomaly,
+            ),
+            _level_cube("ta", 250.0, "K", series=anomaly, **common),
+            _level_cube("hus", 0.005, "1", **common),
+        ],
+    )
+
+
+def test_precip_buoyancy_matches_levels_within_a_tolerance(monkeypatch) -> None:  # noqa: ANN001
+    """ACCESS-CM2's plev19 sits 1e-8 Pa off ERA5's; the gate must still gate.
+
+    Regression test (2026-10-28 CMIP6 re-run): extracting the reference on
+    the model's 100000.00000001 Pa interpolated outside ERA5's range and gave
+    an all-NaN reference column — no gate row for ACCESS-CM2/ACCESS-ESM1-5.
+    """
+    raw, _ = _run_against_observations(
+        monkeypatch,
+        _model_on(PLEV + 1.0e-8),
+        _observations(),
+    )
+    assert raw["precip_buoyancy_n_levels"] == PLEV.size
+    assert raw["precip_buoyancy_levels_dropped"] == 0.0
+    expected = _expected_slope()
+    assert raw["precip_buoyancy_slope_ref"] == pytest.approx(expected, rel=0.02)
+    assert raw["precip_buoyancy_slope_rel_error"] < 0.05  # noqa: PLR2004
+
+
+def test_precip_buoyancy_drops_levels_above_the_reference_top(monkeypatch) -> None:  # noqa: ANN001
+    """ICON-ESM-LR's 3/5/7 Pa lie above ERA5's top: drop them on both sides.
+
+    The model carries one level above the reference's highest; the column is
+    integrated over the four shared levels on BOTH sides, so the model slope
+    is the four-level one and the gate row exists.
+    """
+    model_plev = np.append(PLEV, 10000.0)
+    raw, _ = _run_against_observations(
+        monkeypatch,
+        _model_on(model_plev),
+        _observations(),
+    )
+    assert raw["precip_buoyancy_n_levels"] == PLEV.size
+    assert raw["precip_buoyancy_levels_dropped"] == 1.0
+    assert raw["precip_buoyancy_top_level_pa"] == PLEV.min()
+    assert raw["precip_buoyancy_slope"] == pytest.approx(_expected_slope(), rel=0.02)
+    expected = _expected_slope()
+    assert raw["precip_buoyancy_slope_ref"] == pytest.approx(expected, rel=0.02)
+
+
+def test_precip_buoyancy_drops_a_level_the_model_leaves_empty(monkeypatch) -> None:  # noqa: ANN001
+    """CAMS-CSM1-0/GFDL-CM4/INM-CM4-8 publish nothing at the top of plev19.
+
+    One entirely masked level made the trapezoid NaN in every column. It is
+    dropped, and the REFERENCE is integrated over the same three levels.
+    """
+    raw, _ = _run_against_observations(
+        monkeypatch,
+        _model_on(PLEV, missing_levels=(PLEV.size - 1,)),
+        _observations(),
+    )
+    three = PLEV[:-1]
+    assert raw["precip_buoyancy_n_levels"] == three.size
+    assert raw["precip_buoyancy_levels_dropped"] == 1.0
+    assert raw["precip_buoyancy_top_level_pa"] == three.min()
+    assert raw["precip_buoyancy_slope"] == pytest.approx(
+        _expected_slope(plev=three),
+        rel=0.02,
+    )
+    assert raw["precip_buoyancy_slope_ref"] == pytest.approx(
+        _expected_slope(plev=three),
+        rel=0.02,
+    )
+    assert _expected_slope(plev=three) != pytest.approx(_expected_slope(), rel=0.05)
 
 
 def test_restrict_to_years_refuses_a_record_outside_the_window() -> None:
