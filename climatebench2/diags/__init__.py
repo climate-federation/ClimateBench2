@@ -91,6 +91,7 @@ from climatebench2.diags.tier2_scores import (
     ScoredAnnualMaxTimeSeries,
     ScoredAnnualMeanTimeSeries,
     ScoredMonthlyMeanTimeSeries,
+    ScoredOceanHeatContent,
     TrendConsistency,
 )
 
@@ -136,6 +137,7 @@ __all__ = [
     "ScoredAnnualMaxTimeSeries",
     "ScoredAnnualMeanTimeSeries",
     "ScoredMonthlyMeanTimeSeries",
+    "ScoredOceanHeatContent",
     "SeasonalCloudRadiativeFeedback",
     "SupersetExperimentMixin",
     "TrendConsistency",

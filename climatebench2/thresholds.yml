@@ -326,6 +326,12 @@ tier2:
     clt: null                          # TODO(Duncan): MODIS global-mean 1-sigma (%)
     clwvi: null                        # TODO(Duncan): MODIS, kg m-2
     clivi: null                        # TODO(Duncan): MODIS, kg m-2
+    phcint: null                       # ZJ; OHC series (phcint_total/_2000m/_100m).
+                                       # No published floor pinned: sigma_obs is the
+                                       # IAP-EN4 inter-product spread alone.
+                                       # TODO(Duncan): a floor, e.g. the IAP/Cheng
+                                       # et al. 0-2000 m 1-sigma (O(1-3) ZJ, larger
+                                       # for the full column).
     # Aggregated scalars (gmst_*, pinatubo_*, nh_minus_sh_*) carry their own
     # sigma_obs as a `<scalar>_sigma_obs` companion column emitted by the
     # diagnostic (the blending term below), so they stay `null` here — an

@@ -228,32 +228,52 @@
     - *tos
 
 - name: ohc
-  diagnostic: climateeval.diags.simple.OceanHeatContentTimeSeries
+  # Ocean heat content of the full column and of the 0-2000 m and 0-100 m
+  # layers (paper Table 2: annual, Extended), regime (a): the annual global
+  # series in ZJ, scored as anomalies about each source's own 1985-2014 mean.
+  #
+  # INPUT IS `thetao` (what a submission uploads), not a staged `phcint`:
+  # `climatebench2.data.layer_heat_content` turns it into the layer's heat
+  # content per unit area on load (ESMValCore main's phcint: thetao[K] x
+  # rho0*cp x thickness, the layer cut exactly at z_max, summed over depth on
+  # the source's own grid), so the submission, both references and every
+  # comparison member go through the same code and nothing is materialised.
+  # The layer bounds are protocol: they are recorded in each database's
+  # `variables` row, which the frozen-comparison merge checks.
+  #
+  # Reference IAP (named by the paper; ends 2024-12, so the scored window is
+  # 2015-2024), EN4 as the second observational product (to 2025-12; its
+  # spread against IAP enters sigma_obs). The other way round, IAP would fail
+  # ClimateEval's coverage check over EN4's 2015-2025 window and drop out.
+  # The CMIP6 comparison ensemble (thetao staged for 100 members / 36 models)
+  # is what E_ref is the median over, as for every scored variable.
+  diagnostic: climatebench2.diags.ScoredOceanHeatContent
   variables:
     - &ohc
       id: phcint_total
-      var_name: phcint
+      var_name: thetao
       frequency: mon
-      reference_data: climateeval.data.EN4
-      other_data: [climateeval.data.IAP]
-    # The paper names both layers: 0-2000 m (the standard OHC index) and
-    # 0-100 m (the mixed layer, where the seasonal and interannual signal
-    # lives). Both are annual global series with an EN4/IAP reference, so the
-    # scoring pass picks them up as regime (a) like any other time series.
+      units: J m-2
+      reference_data: climateeval.data.IAP
+      other_data:
+        - climateeval.data.EN4
+        - climatebench2.data.StagedCMIP6HistoricalSSP245
+      additional_preprocessors:
+        climatebench2.data.layer_heat_content:
+          z_min: 0.0
+          z_max: null
     - <<: *ohc
       id: phcint_2000m
       additional_preprocessors:
-        esmvalcore.preprocessor.extract_volume:
+        climatebench2.data.layer_heat_content:
           z_min: 0.0
           z_max: 2000.0
-          interval_bounds: left_closed
     - <<: *ohc
       id: phcint_100m
       additional_preprocessors:
-        esmvalcore.preprocessor.extract_volume:
+        climatebench2.data.layer_heat_content:
           z_min: 0.0
           z_max: 100.0
-          interval_bounds: left_closed
 
 # --- Sea ice ---------------------------------------------------------------
 #

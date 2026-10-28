@@ -53,7 +53,11 @@ from climateeval import Variable
 from climateeval._config import setup_esmvaltool_config_and_logging
 from climateeval._variable import COORDINATES
 from climateeval.diags._utils import DEFAULT_GRID
-from climateeval.diags.simple import AnnualMeanTimeSeries, MeanTimeSeries
+from climateeval.diags.simple import (
+    AnnualMeanTimeSeries,
+    MeanTimeSeries,
+    OceanHeatContentTimeSeries,
+)
 
 from climatebench2 import scoring, windows
 from climatebench2._thresholds import get_threshold
@@ -73,6 +77,43 @@ class ScoredAnnualMeanTimeSeries(AnnualMeanTimeSeries):
     diagnostic's ``metrics`` table by the post-processing pass, once every
     ensemble member has been ingested.
     """
+
+
+class ScoredOceanHeatContent(OceanHeatContentTimeSeries):
+    """Global ocean heat content series (ZJ) scored by the Tier II pass.
+
+    ClimateEval's diagnostic unchanged — regrid, sum over depth, sum over
+    area, annual mean, anomaly, ZJ — except for **which years the anomaly is
+    taken about**: upstream fixes 1979-1988, this takes the protocol's
+    climatology baseline (``tier2.climatology_baseline_period``, 1985-2014).
+
+    For the score itself that is immaterial: the pass re-anomalises every
+    source about its own 1985-2014 mean (``tier2.anomaly_baseline``), and a
+    constant offset per source cancels exactly. It matters for which sources
+    can be scored at all: the entry is loaded from 1985, so the upstream
+    reference period leaves four years (1985-1988) in the cube, and a source
+    starting after 1988 — an emulator run from 2000, say, which the pass
+    would accept with its 15 baseline years — fails the upstream ``anomalies``
+    step ("outside cube time bounds") and loses its row. With the protocol
+    baseline the raw series is the protocol's anomaly already.
+
+    The input is ``thetao`` turned into the layer's heat content on load by
+    :func:`climatebench2.data.layer_heat_content` (the suite variable's
+    ``additional_preprocessors``), a single level per layer, so the depth sum
+    here is a no-op.
+    """
+
+    @property
+    def _anomaly_reference(self) -> dict[str, int]:  # type: ignore[override]
+        start, end = (int(y) for y in get_threshold("tier2.climatology_baseline_period"))
+        return {
+            "start_year": start,
+            "start_month": 1,
+            "start_day": 1,
+            "end_year": end,
+            "end_month": 12,
+            "end_day": 31,
+        }
 
 
 class ScoredMonthlyMeanTimeSeries(MeanTimeSeries):

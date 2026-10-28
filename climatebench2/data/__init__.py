@@ -6,7 +6,7 @@ behind the pattern-scaling baseline (``erf_ar6_ssp245.csv``, read by
 :func:`climatebench2.baselines.load_erf_series`).
 
 Model output and observations never live here — they come from ClimateEval
-DataSources (docs/climateeval_delineation_plan.md, the ownership test). Three
+DataSources (docs/climateeval_delineation_plan.md, the ownership test). Four
 things that do:
 
 * :class:`~climatebench2.data.cmip6_staged.StagedCMIP6HistoricalSSP245` — a
@@ -26,6 +26,11 @@ things that do:
   (``clt``, ``clwvi``, ``clivi``, ``lwp``) from MODIS Aqua MYD08_M3, staged
   because ESMValTool's MODIS CMORizer output is in the unreadable Tier-3
   pool. Same shape as ``IMERG``, same "belongs upstream" caveat.
+* :func:`~climatebench2.data.ocean_heat_content.layer_heat_content` — the
+  ``thetao`` -> layer ocean heat content derivation (ESMValCore ``main``'s
+  ``phcint``, which the pinned ESMValCore lacks), run as a suite variable's
+  ``additional_preprocessors`` step so the submission, the references and the
+  comparison ensemble all score OHC from ``thetao``. Belongs upstream too.
 """
 
 from climatebench2.data.cmip6_staged import (
@@ -34,6 +39,7 @@ from climatebench2.data.cmip6_staged import (
     staged_root,
 )
 from climatebench2.data.imerg import IMERG
+from climatebench2.data.ocean_heat_content import layer_heat_content
 from climatebench2.data.modis import MODIS
 
 __all__ = [
@@ -41,5 +47,6 @@ __all__ = [
     "MODIS",
     "STAGED_ROOT_ENV",
     "StagedCMIP6HistoricalSSP245",
+    "layer_heat_content",
     "staged_root",
 ]
