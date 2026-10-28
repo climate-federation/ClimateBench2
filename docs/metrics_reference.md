@@ -1046,9 +1046,8 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
   | CMIP6 `plev19` | 0.03403 | 0.11 |
 
   The paper integrates the reference over the submission's own levels (App. B.3), and
-  `_calculate_raw_output` derives that level set once from the submission's own
-  `ta`/`hus` (`_common_levels`, the intersection of their `air_pressure` points,
-  ≥ 2 required), passes it to both slopes and emits **`precip_buoyancy_n_levels`**.
+  both columns are integrated over **the levels both sides actually carry**
+  (next-but-one bullet), emitted as **`precip_buoyancy_n_levels`**.
   ⚠ **The table above is a bug, not discretisation** (found 2026-10-27; next bullet).
 - ✅ **Each level is weighted by its own pressure** (2026-10-27, a code bug fixed).
   `_column_mse` handed `mass_weighted_column_integral` the *ascending* sorted level
@@ -1074,6 +1073,28 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
   hydrostatic z each move the model slope by about 1 %. A synthetic regression test
   with a bottom-heavy anomaly fails on the old code; every earlier test used a
   height-uniform anomaly, which the ordering cannot affect.
+- ✅ **One level set, built symmetrically** (2026-10-28). The CMIP6 re-run of I.3c left
+  six models with no gate row for reasons of level bookkeeping: ACCESS-CM2 and
+  ACCESS-ESM1-5 carry `plev19` 1e-8 Pa off ERA5's (100000.00000001 Pa), so the
+  reference, put on the model's levels, was interpolated outside ERA5's range and came
+  back all-NaN; ICON-ESM-LR has levels at 3, 5 and 7 Pa above ERA5's 1 hPa top (same
+  result); and CAMS-CSM1-0, GFDL-CM4 and INM-CM4-8 publish no `ta`/`hus` at all on their
+  top `plev19` level(s) (1 hPa, and 5 hPa for two of them), which made the trapezoid NaN
+  in every model column. The level set is now:
+  1. the levels `ta` and `hus` share, matched within a relative 1e-6 (a representation
+     tolerance, `_level_rtol`, not a protocol bound), with the other cube's points
+     **snapped** onto the submission's values;
+  2. minus every level on which `ta` or `hus` is **entirely** missing (all-NaN or masked
+     over 20S–20N and the months used) on the model side;
+  3. minus every level **outside the reference's pressure range**, and every level the
+     reference has no data on (the reference is snapped onto the submission's values
+     first; a level inside its range that ERA5 does not carry is interpolated);
+  and **both** columns are integrated over that identical set (≥ 2 levels). A level that
+  is only partly missing (sub-surface 1000 hPa points) is kept; those columns drop out
+  of the pooled regression as before. `precip_buoyancy_levels_dropped` (a count),
+  `precip_buoyancy_top_level_pa` and `precip_buoyancy_bottom_level_pa` are emitted and
+  the dropped levels are logged with their reasons. With the stored-slope fallback only
+  steps 1–2 apply.
 - ✅ **The stored `reference_slope` stays null.** It was left null because a constant
   seemed to be correct for one level set only (decision C.2); with the level-order bug
   fixed that reason is gone (0.1162 on 37 levels, 0.1166 on `plev19`), so pinning one
@@ -1099,7 +1120,8 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
 - Gate row `precip_buoyancy` on `|slope_model/slope_ref − 1| ≤
   `rel_tolerance_vs_obs` = 0.30`; `precip_buoyancy_slope`, `precip_buoyancy_n_levels`,
   `precip_buoyancy_n_months`, `precip_buoyancy_first_year`, `precip_buoyancy_last_year`,
-  `precip_buoyancy_slope_ref`, `precip_buoyancy_reference_from_obs` and
+  `precip_buoyancy_levels_dropped`, `precip_buoyancy_top_level_pa`,
+  `precip_buoyancy_bottom_level_pa`, `precip_buoyancy_slope_ref`, `precip_buoyancy_reference_from_obs` and
   `precip_buoyancy_slope_rel_error` are emitted.
 - Tested on synthetic cubes with a column whose MSE anomaly is known analytically and
   a `pr` field that responds differently outside 25S–25N, so a gate that forgot the
@@ -1109,7 +1131,10 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
   to 1983–2014, against a reference regressed over the same 384 months; a reference
   that ends in 2010 cuts the model to the same 336 months; the stored-slope fallback
   keeps the model on the window; and a model with a deliberately wrong `zg`, or none,
-  gives the same slope as one with a correct `zg`.
+  gives the same slope as one with a correct `zg`. Since 2026-10-28: levels 1e-8 Pa off
+  the reference's still gate; a model level above the reference's top is dropped on both
+  sides; an entirely masked model level is dropped and the reference is integrated over
+  the same remaining levels.
 - ✅ **Real data, CNRM-CM6-1 (2026-10-27, one-gate suite through `climatebench2 score`,
   19 `plev19` levels).** v1.0.0: model 0.02316 (1850–2014, 1980 months), reference
   0.03402 (1983–2014, 384), |model/ref − 1| = **0.319 — fail** (the published Tier I
@@ -1121,7 +1146,8 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
 
 ```python
 months = common_months(model[pr, ta, hus], gpcp.pr, era5[ta, hus], within=(1983, 2014))
-levels = common_plev(model.ta, model.hus)                    # the SUBMISSION's levels
+levels = common_plev(model.ta, model.hus, era5.ta, era5.hus)  # submission's values, rtol 1e-6,
+                                    # minus levels empty on either side or outside ERA5's range
 def slope(pr, ta, hus):                                      # same code for both sides
     ta, hus = ta.sel(time=months, plev=levels), hus.sel(time=months, plev=levels)
     z = hydrostatic_height(ta, hus)                          # never the model's zg
