@@ -15,7 +15,7 @@ exactly.
 
 | Input | Default location | Size |
 |---|---|---|
-| Reference bundle `v2` (`<source id>/<frequency>/<var>/*.nc`, `MANIFEST.json`) | `gs://climatebench/v2/references/` | ~34 GB |
+| Reference bundle `v2` (`<source id>/<frequency>/<var>/*.nc`, `MANIFEST.json`) | `gs://climatebench/v2/references/` | ~34 GB (OHC reads the IAP and EN4 `thetao`; their precomputed `phcint`, 6.7 GB, is no longer read) |
 | Frozen comparison bundle `v2` (`*.ddb`, `manifest.json`) | `gs://climatebench/v2/comparison/` | <0.1 GB |
 | The submission | any `s3://` prefix | 10–300 GB |
 
@@ -42,12 +42,35 @@ s3://bucket/MyModel/
 The profile (`profiles/v2.yml`) maps directory names to
 `climatebench2 score --experiment` keys.
 
+### What the Tier II ensemble directories must contain
+
+CMOR-like monthly NetCDF (`<var>_<table>_<model>_<exp>_<member>_<grid>_<YYYYMM>-<YYYYMM>.nc`),
+historical and SSP2-4.5 spliced or as consecutive files, **covering 1985 to the end of
+each variable's scored window** (the 1985–2014 years are each source's anomaly
+baseline; a variable with fewer than 10 baseline years is left unscored, never scored
+on absolute values). A variable that is absent is skipped, not failed.
+
+**Ocean heat content: upload `thetao`, not `phcint`.** The OHC rows (full column,
+0–2000 m, 0–100 m; scored 2015–2024 against IAP) are computed from `thetao` (Omon,
+sea water potential temperature, `degC` or `K`) by the scorer itself, exactly as for the
+references and the CMIP6 comparison ensemble. It must be on **depth** levels: a
+vertical dimension coordinate with depth units (`m`, or `cm`), positive down, and
+**cell bounds** (`lev_bnds`) giving each level's top and bottom — the layer thickness
+weights the heat content, so missing bounds are only guessed from midpoints.
+Isopycnal or hybrid-density levels cannot be used; regrid them to z levels first.
+Name the axis the CMOR way (`lev`, standard name `depth`). Any horizontal grid that
+ClimateEval's regridding reads (regular, curvilinear with 2-D `latitude`/`longitude`,
+or unstructured) is accepted; land and below-sea-floor cells must be masked
+(`_FillValue`). A precomputed `phcint` is not read. `thetao` is the largest field a
+submission sends (~3–80 GB per member for 1985–2024, depending on resolution); a
+submission without it simply has no OHC rows.
+
 ## Profiles
 
 A profile pins everything two submissions must share for their scores to be
 comparable:
 - the reference and comparison bundle URIs;
-- the Tier II window (`20150101/20251231`, clipped per variable to its reference's last complete year);
+- the Tier II window (`20150101/20251231`, clipped per variable to its reference's last complete year: OHC is scored 2015–2024, IAP's last complete year);
 - the suites.
 
 The CLI refuses a frozen bundle whose protocol fingerprint, CB2 version or

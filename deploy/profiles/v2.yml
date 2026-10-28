@@ -6,7 +6,8 @@ name: v2
 description: >-
   ClimateBench v2 Tier I gates and Tier II scores. Tier II is scored over
   2015-2025, clipped per variable to the last complete year of its reference
-  (HadCRUT5 2022, GPCP 2023, CERES-EBAF and IMERG 2024, HadISST 2025).
+  (HadCRUT5 2022, GPCP 2023, CERES-EBAF, IMERG and IAP 2024, HadISST 2025).
+  Ocean heat content is scored from the submission's `thetao`.
 
 # Object-storage locations. The bundles are read anonymously from the public
 # bucket; results are written there with a GCS HMAC key (cb2_run.upload).
@@ -47,3 +48,11 @@ experiments:
   patch-ep: patch_ep
   patch-wp: patch_wp
 ensemble_dir: historical-ssp245
+
+# What a Tier II member directory must hold (deploy/README.md, "Submission
+# layout"): CMOR-like monthly NetCDF from 1985 to the end of each variable's
+# scored window. Ocean heat content is computed by the scorer from `thetao`
+# (Omon, depth levels with lev_bnds, positive down; degC or K) for the full
+# column and the 0-2000 m / 0-100 m layers — upload `thetao`, never `phcint`.
+submission_variables:
+  ocean_heat_content: thetao

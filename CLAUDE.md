@@ -52,7 +52,8 @@ climatebench2/
 ├── shared_sources.py    # reference + comparison ensemble loaded once for all members
 ├── frozen_comparison.py # freeze the CMIP6 comparison rows into a bundle; merge into a run
 ├── data/                # cmip6_staged.py (StagedCMIP6HistoricalSSP245: the ensemble behind
-│                        #   E_ref), imerg.py (daily pr), modis.py (clouds), ERF table (EBM)
+│                        #   E_ref), imerg.py (daily pr), modis.py (clouds), ERF table (EBM),
+│                        #   ocean_heat_content.py (thetao -> layer OHC on load; upstream candidate)
 ├── leaderboard/         # .ddb results -> scores table -> static HTML page
 └── _cli.py              # `climatebench2 score` / `climatebench2 leaderboard`; SUITE_REGISTRY
 ```

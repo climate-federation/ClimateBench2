@@ -298,7 +298,7 @@ what the paper says and the paper's number looks unreachable.
 5. **§4.3 cross-reference.** The ENSO paragraph cites `app:implementation` where
    `app:tier1` is meant. → discrepancy #21.
 
-### B. Protocol interpretations made in code — ratify or overrule (31)
+### B. Protocol interpretations made in code — ratify or overrule (32)
 
 Each of these is a reading CB2 had to commit to in order to compute anything. All are
 implemented and unit-tested; none is claimed to be the paper's own words.
@@ -504,6 +504,27 @@ implemented and unit-tested; none is claimed to be the paper's own words.
     `null` for the clouds (B.20).
     → Tier II status table "Cloud properties" / "Cloud-radiative effect",
     `climatebench2/data/modis.py`, `suites/ClimateBench2_TierII.yml`.
+32. **OHC is scored from `thetao`, against IAP, with EN4 as the second product**
+    (2026-10-28, Duncan approved scoring OHC with the comparison ensemble). Readings to
+    ratify: (i) **reference IAP**, the product the paper's Table 2 names (with Argo and
+    Levitus), not EN4 as before — IAP ends 2024-12, so the scored window is
+    **2015–2024**; EN4 (to 2025-12) is the `other_data` product whose spread against IAP
+    is σ_obs. The other way round IAP fails ClimateEval's coverage check over EN4's
+    2015–2025 window and drops out, leaving no second product. (ii) **σ_obs floor
+    `null`** (`tier2.obs_sigma.phcint`): σ_obs is the IAP–EN4 spread alone until a
+    published floor is pinned. (iii) the **layer is cut exactly** at 2000 m / 100 m
+    (partial bottom cell), not by level centre as `extract_volume` did. (iv) ρ₀c_p =
+    4.09169×10⁶ J m⁻³ K⁻¹ (ESMValCore main's `phcint`, Kuhlbrodt et al. 2015) is a
+    constant of the derivation, kept in `climatebench2/data/ocean_heat_content.py`
+    with the code that would move upstream; the layer bounds are protocol and sit in
+    the suite variable's `additional_preprocessors`, where every database's
+    `variables` row records them and the frozen-comparison merge checks them (a
+    `thresholds.yml` key would have had to join `PROTOCOL_THRESHOLDS`, changing the
+    fingerprint of every existing bundle). (v) Still **not in the published
+    scorecard's sense of "Required"**: Extended, and only **16 of the 36** comparison
+    models with `thetao` have ≥ 2 members, so `E_ref` is a median over 16 (15 with
+    leave-one-out) models.
+    → Tier II status table "OHC", §II.0 "OHC", `climatebench2/data/ocean_heat_content.py`.
 
 ### C. Placeholder data — must be replaced before publication (3)
 
@@ -1882,7 +1903,7 @@ gone.
 | TOA fluxes (LW/SW, all- and clear-sky) | (a) | ✅ (gap item 6, `9d4b7a9`) `rsut`, `rlut`, `rtnt` **and `rsutcs`/`rlutcs`** vs CERES-EBAF, all in `core_variables` so they are scored by the pass and carried through the annual-cycle, map, zonal-line, baseline and EOF entries alike. Scored over **2015–2024** (CERES-EBAF to 2025-09). `rtnt` is derived, so a comparison member needs all three of `rsdt`/`rsut`/`rlut` staged (`dc1efc3`) — before that fix it had **zero** comparison members | suite + `CERESEBAF` |
 | Cloud-radiative effect (SW, LW) | (a)/(b) | ✅ **code** (2026-09-24) `swcre` (= `rsutcs − rsut`) and `lwcre` (= `rlutcs − rlut`), ClimateEval's derived variables, vs CERES-EBAF in `core_variables` — every entry the TOA fluxes are in, with the comparison ensemble; in the figure set (B.26). Nothing is staged under their names: CERES derives them from its staged fluxes and a comparison member needs **both** the all-sky and clear-sky flux (128 members for `swcre`, 131 for `lwcre` on the staged tree), tested on both sides. Anomaly baseline **2001–2014**, scored **2015–2024** (CERES-EBAF). 🟡 not yet run on real data (split suite `cre_score`); σ_obs provisional (B.31) | suite + `CERESEBAF`, `StagedCMIP6HistoricalSSP245._required_var_names` |
 | Sea ice extent, Sep/Feb minima, trends | (a)/(b) | ✅ **extent, not area** (2026-09-20, `b9f4952`; PR #47 merged): the stanzas use `SeaIceExtentAnnualCycle` / `SeaIceExtentTimeSeries` (Σ A where siconc ≥ 15 %), which is what the paper scores — area is a systematically different, much less bias-sensitive number. ⚠ There is **no `extent_threshold` diagnostic kwarg**; 15 % is the class default `_concentration_threshold` (`SEA_ICE_EXTENT_THRESHOLD`), and a suite passing `extent_threshold:` would raise on an unexpected kwarg — the commented-out stanza this replaced was wrong about the API. Reference **HadISST** (`reanalysis_HadISST/mon/siconc`, to 2021-12, so the scored window is 2015–2021); the protocol names OSI-450 / NSIDC-G02202, neither of which is staged — **RATIFIED**, decision B.25. `siconc` also gained the comparison ensemble; until `b9f4952` the sea-ice stanzas listed observational products only, so **no comparison model ever reached `E_ref`** there and every sea-ice score was unreferenced. The NH-Sep/SH-Feb minimum series is scored as regime (a); the annual-cycle entry stays deterministic (a `month_number` axis is neither regime) | `ClimateBench2_TierII.yml`, `climateeval.diags.simple._sea_ice` |
-| OHC 0–100 m, 0–2000 m | (a) | ✅ (gap item 6, `9d4b7a9`) total column, **0–2000 m and 0–100 m** (`extract_volume`) vs EN4/IAP via `OceanHeatContentTimeSeries` on `phcint`; all three are annual series with a reference, so the pass scores them as regime (a) — verified, and reached only after the per-variable reference fix | suite |
+| OHC 0–100 m, 0–2000 m | (a) | ✅ **scored with `E_ref`** (2026-10-28): full column, **0–2000 m and 0–100 m**, annual global series in ZJ, anomalies about each source's own 1985–2014 mean, scored 2015–2024. Input is **`thetao`** — what a submission uploads — turned into the layer's heat content on load by `climatebench2.data.layer_heat_content` (ESMValCore main's `phcint`: θ[K] × ρ₀c_p × thickness, the layer cut exactly, summed over depth on the source's grid; the pinned ESMValCore 2.14 has no `phcint` derivation, so before this only a pre-computed `phcint` could be read and the comparison ensemble had none). `ScoredOceanHeatContent` is ClimateEval's `OceanHeatContentTimeSeries` with the protocol baseline as its anomaly period (B.32). Reference **IAP**, second product **EN4** (σ_obs spread), comparison ensemble attached: `thetao` staged for **100 members / 36 models, 16 with ≥ 2 members**. Before: `phcint` vs EN4 with IAP as the only `other_data` — no comparison model, so no `E_ref` and no skill | suite + `climatebench2/data/ocean_heat_content.py`, `diags/tier2_scores.py::ScoredOceanHeatContent` |
 | Surface fluxes (pattern/seasonal-cycle scoring; FLUXNET/OceanSITES/BSRN sites) | (b) | ❌ (Extended; no obs DataSource; no site machinery) | — |
 | Cloud properties (LWP, fraction, CTT/CTP) | (a)/(b) | ✅ **code** (2026-09-24) `clt`, **`clwvi` and `clivi`** vs **MODIS** Aqua MYD08_M3 C6.1 (`climatebench2.data.MODIS`, staged; grid-box-mean paths as in ESMValTool's `modis.ncl`), in every core entry with the comparison ensemble, and back **in the paper's figure set** (B.26). Before: ESACCI-CLOUD, which ends 2016-12 — a two-year scored window, below the pass's minimum overlap, so they sat outside the figure. MODIS starts 2002-07: `annual_mean_timeseries` loads **2003 → last complete year** (anomaly baseline **2003–2014**, 12 yr ≥ `min_years` 10), the other entries the test window. 🟡 MODIS not yet staged under `observation_MODIS/` nor run (split suites `clt_score`/`clwvi_score`/`clivi_score`); only 48/31/35 comparison members carry `clt`/`clwvi`/`clivi` on the staged tree; `lwp` staged but not scored; CTT/CTP ❌ — no DataSource (B.31) | suite + `climatebench2/data/modis.py` |
 | prw | (a) | 🟡 vs `ERA5Monthly` (paper: RSS primary, ERA5 as reference) — acceptable pending an RSS DataSource | suite |
@@ -2233,12 +2254,33 @@ T_eff = len(crps_t) * (1 - r1) / (1 + r1)
 score = crps_t.mean();  score_se = crps_t.std() / np.sqrt(T_eff)   # ESS on the SE only
 ```
 
-**OHC.** Provided by ClimateEval's `OceanHeatContentTimeSeries` on the derived
-`phcint` variable (0–2000 m via `esmvalcore.preprocessor.extract_volume`), scored with
-ClimateEval's deterministic metrics against EN4/IAP; the legacy gsw/TEOS-10 derivation
-is gone. Add the 0–100 m stanza and route the series through
-`ScoredAnnualMeanTimeSeries` for regime (a).
+**OHC.** ClimateEval's `OceanHeatContentTimeSeries` (regrid → Σ depth → Σ area →
+annual mean → anomaly → ZJ), wrapped as `ScoredOceanHeatContent` so its anomaly period
+is `tier2.climatology_baseline_period` (1985–2014) instead of upstream's fixed
+1979–1988. The pass re-anomalises every source about its own 1985–2014 mean anyway
+(`tier2.anomaly_baseline.ohc`), so the offset cancels exactly; what the wrapper buys is
+that a source starting after 1988 (which the pass accepts with ≥ 10 baseline years)
+still gets a series instead of failing the upstream anomaly step.
 
+The variable is `thetao` with `units: J m-2` and the preprocessing step
+`climatebench2.data.layer_heat_content: {z_min, z_max}` — run by ClimateEval after its
+own time/region cut, for the submission, the IAP reference, EN4 and every comparison
+member alike:
+
+```python
+dz_k  = max(0, min(bottom_k, z_max) - max(top_k, z_min))      # from the level bounds, in m
+OHC_layer(t, y, x) = sum_k  thetao_k[K] * 4.09169e6 * dz_k      # J m-2, masked levels skipped
+# returned as ONE level spanning [z_min, z_max] (positive down); the diagnostic's
+# horizontal regrid then sees a 2-D field per step, and its depth sum is a no-op
+```
+
+Vertical coordinates are normalised because the staged CMIP6 files are read without
+ESMValCore's CMOR fixes: units → m (CESM2's cm points with m bounds are reconciled),
+unitless MIROC `ocean_sigma_z` read as nominal metres, missing bounds (AWI-CM) guessed
+from midpoints with the top at the surface, a density axis refused (NorESM2 is staged
+from its `gr` z-level `thetao`, not the isopycnal `gn`); the comparison loader
+(`StagedMemberDataSource`) also renames an unrecognised vertical axis (IPSL/CNRM
+"Vertical T levels", CESM2, MIROC) so ClimateEval's coordinate check finds it.
 ## II.1 Per-diagnostic specs (regime and formulas)
 
 Each item below inherits the scoring machinery of §II.0 — fair CRPS for time-resolved
@@ -2950,7 +2992,7 @@ unchanged — is now built:
 | Tier | Specced diagnostics | ✅ | 🟡 | ❌ |
 |---|---|---|---|---|
 | I | 18 sub-checks (16 Table-1 rows) + 2 code-only extras; all tagged Required / Extended / extra, entry ticket over the Required group only | **18 — every Table-1 row**: I.1, I.2a, I.2b, I.3a, I.3b, **I.3c**, I.4a, I.4b, I.5a, I.5b, **I.5c**, I.5d, I.6a, I.6b, I.6c, **I.7**, I.8a, I.8b (+ Bjerknes, C–C vs their own specs); I.6a/b, I.6c and I.8a are thin CB2 gates over ClimateEval `main`'s own diagnostics. **Every Required gate produced a row on a real model (CNRM-CM6-1, 2026-09-20)** | 0 | 0 missing in code — but three of the *bounds* now look unreachable or grid-dependent on real data (I.3a, I.1, I.8a; see decisions E.1–E.3), I.3c fails at 0.84 against 0.30 (E.4), the fixed-SST and daily-`pr` gates have no staged data of their own, and I.5c still has no ERA5 temperature reference staged |
-| II | fair-CRPS engine + skill score + baselines + ~20 diagnostic families | **fair CRPS with the M = 1 rule; member stacking by model name; ESS correction; moving-block bootstrap; observational-uncertainty draws; a CMIP6-median `E_ref` with leave-one-out that is now **numerically live** over a staged 42-model / 160-member comparison ensemble; a per-variable scored window clipped to each reference's record; sea-ice extent; regime (b) as fair CRPS on the reference's fixed pre-2015 EOF basis; the aggregated-scalar regime; σ_int from piControl chunks in the consistency test; the reference's pre-test record carried past the test-window cut; one label per model across the tiers; the realized warming level and both GMST trends with the GSAT blending correction; held-out / in-sample labelling end to end; per-member runs of the Tier II events suite; the skill table in the leaderboard; the eight **ETCCDI extremes** on the 1° conservative grid, the four precipitation ones **scored against IMERG** over 2001–2014 with Rx1day/Rx5day additionally held out as an annual regional series; the **Perkins** PDF skill and its own leaderboard table; the three **seasonal-cycle** metrics; the **diurnal** first harmonic in local solar time with a (cos, sin) phase; the **pattern-scaling** baseline for GMST-type series, ERF-driven and calibrated through 2014**; deterministic metrics for tas/pr/TOA(all- and clear-sky)/prw/clouds/tos/OHC(total, 2000 m, 100 m)/sea-ice via ClimateEval | climatology baseline scored as a distribution (CB2 interpretation, ⚠) and only for regime (a); every σ_obs value — the GSAT blending factor and the packaged ERF table — provisional (⚠); the regime-(b) bootstrap axis, the model-anomaly definition, the EBM pseudo-members, the (cos, sin) phase, the per-calendar-month extremes threshold and `clt` as the low-cloud proxy are CB2 readings (⚠); Gaussian consistency null; Pinatubo `rsds` and the ITCZ shift still sign-only (no obs product); **the four TEMPERATURE ETCCDI extremes computed but unscored — no daily obs DataSource staged (HadEX3 is merged upstream); the precipitation ones are scored against IMERG, which is itself not staged yet either**; the in-sample precipitation window is CB2's reading (2001–2014, decision B.30) rather than the paper's "full historical record"; `tas` scored against HadCRUT5 alone and **no variable has a second observational product on the staged root**, so σ_obs has no measured inter-product term anywhere; `tos` referenced against EN4 rather than ESACCI-SST, `ts` against MERRA-2 rather than a skin-temperature product; the clouds against MODIS Aqua alone, through `modis.ncl`'s random-overlap grid-box conversion (B.31) | surface fluxes; the **spatial** half of pattern scaling (the comparison models' baseline-window maps — a CB2 gap, not the upstream one the `reason` row still names); a regime-(b) climatology baseline |
+| II | fair-CRPS engine + skill score + baselines + ~20 diagnostic families | **fair CRPS with the M = 1 rule; member stacking by model name; ESS correction; moving-block bootstrap; observational-uncertainty draws; a CMIP6-median `E_ref` with leave-one-out that is now **numerically live** over a staged 42-model / 160-member comparison ensemble; a per-variable scored window clipped to each reference's record; sea-ice extent; regime (b) as fair CRPS on the reference's fixed pre-2015 EOF basis; the aggregated-scalar regime; σ_int from piControl chunks in the consistency test; the reference's pre-test record carried past the test-window cut; one label per model across the tiers; the realized warming level and both GMST trends with the GSAT blending correction; held-out / in-sample labelling end to end; per-member runs of the Tier II events suite; the skill table in the leaderboard; the eight **ETCCDI extremes** on the 1° conservative grid, the four precipitation ones **scored against IMERG** over 2001–2014 with Rx1day/Rx5day additionally held out as an annual regional series; the **Perkins** PDF skill and its own leaderboard table; the three **seasonal-cycle** metrics; the **diurnal** first harmonic in local solar time with a (cos, sin) phase; the **pattern-scaling** baseline for GMST-type series, ERF-driven and calibrated through 2014**; deterministic metrics for tas/pr/TOA(all- and clear-sky)/prw/clouds/tos/OHC(total, 2000 m, 100 m)/sea-ice via ClimateEval | climatology baseline scored as a distribution (CB2 interpretation, ⚠) and only for regime (a); every σ_obs value — the GSAT blending factor and the packaged ERF table — provisional (⚠); the regime-(b) bootstrap axis, the model-anomaly definition, the EBM pseudo-members, the (cos, sin) phase, the per-calendar-month extremes threshold and `clt` as the low-cloud proxy are CB2 readings (⚠); Gaussian consistency null; Pinatubo `rsds` and the ITCZ shift still sign-only (no obs product); **the four TEMPERATURE ETCCDI extremes computed but unscored — no daily obs DataSource staged (HadEX3 is merged upstream); the precipitation ones are scored against IMERG, which is itself not staged yet either**; the in-sample precipitation window is CB2's reading (2001–2014, decision B.30) rather than the paper's "full historical record"; `tas` scored against HadCRUT5 alone and **only OHC has a second observational product** (EN4 beside IAP, 2026-10-28), so σ_obs has a measured inter-product term nowhere else; `tos` referenced against EN4 rather than ESACCI-SST, `ts` against MERRA-2 rather than a skin-temperature product; the clouds against MODIS Aqua alone, through `modis.ncl`'s random-overlap grid-box conversion (B.31) | surface fluxes; the **spatial** half of pattern scaling (the comparison models' baseline-window maps — a CB2 gap, not the upstream one the `reason` row still names); a regime-(b) climatology baseline |
 | III | 3 paleo periods + monsoon check + proxy scoring + perfect model + LE spread | **the monsoon gate (with the Harrison 2015 magnitude beside it); the fair CRPS of a block pseudo-ensemble against the proxy compilations, with σ_proxy as the observational variance term and the site-consistency fraction beside it; one suite stanza per (period, dataset, variable) reading the pipeline's own NetCDFs; the App. D scored/reported split by `dataset_type`; a `tier` tag on every gate so Tier III has its own scorecard section** | Temp12k needs a zonal-mean comparison (live stanza, writes its reason); Scussolini 2019 has a reliability flag, not a σ; `block_years`/`spinup_years` are CB2 defaults (⚠); the site standard error ignores inter-site correlation (⚠); **the perfect-model path and the LE-spread test are wired end to end but have never seen data** — no CESM2/MPI-ESM/GISS-E2/CESM-LE is staged, and the variance-ratio bound is a TODO | the PMIP4 comparison ensemble behind `E_ref` — PR #45 is merged but **no PMIP4 pool is staged**, so the generator finds nothing; a PMIP4-proxy DataSource upstream; Osman 2026 LIG SST (unarchived); calibrated Osman 2021 SSTs |
 
 **Cross-cutting discrepancies (paper vs current `climatebench2/` code) — complete list,
