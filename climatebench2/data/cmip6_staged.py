@@ -42,7 +42,9 @@ exports it into the environment for exactly this reason, because ClimateEval
 instantiates a generator with no arguments and calls ``generate(variable)``
 before the diagnostic's data root is known). Pointing the variable at a subset
 of the root is how a smoke run limits the comparison ensemble without
-restaging: discovery uses the subset, while loading still uses ``--data-root``.
+restaging. A member is read from the root it was discovered in (falling back
+to ``--data-root``), so the ensemble root and the reference root may be
+separate directories, as they are for the v2 reference bundle.
 
 Layout it expects — ClimateEval's own
 :meth:`climateeval.data.DataSource._get_data_dir` layout::
@@ -199,6 +201,112 @@ def _discover(root: Path, variable: Variable) -> list[tuple[str, str, list[Path]
     return found
 
 
+def is_ocean_3d(variable: Variable) -> bool:
+    """Whether ``variable`` lives on ocean model levels (``thetao``, ``so``)."""
+    return any(c.var_name == "olevel" for c in variable.coordinates)
+
+
+#: ``var_name`` of a vertical axis in CMIP6 ocean files that iris cannot
+#: identify as one (no ``positive`` attribute, no unit — MIROC's
+#: ``ocean_sigma_z``).
+_VERTICAL_VAR_NAMES = ("lev", "olevel", "depth", "deptht")
+
+
+def normalise_vertical_names(cubes: Any, var_name: str) -> None:  # noqa: ANN401
+    """Make an ocean field's vertical axis findable by ClimateEval.
+
+    ClimateEval's ``check_coordinates`` finds the ``olevel`` axis by the name
+    ``depth`` (the standard name of its ``lev`` coordinate) — iris matches
+    ``coord.name()``, i.e. the standard name, else the long name, else the
+    variable name. CMIP6 files read without ESMValCore's CMOR fixes often fail
+    that: IPSL-CM6A-LR and the CNRM models call the axis "Vertical T levels",
+    CESM2 gives it an invalid standard name that iris drops, MIROC an
+    ``ocean_sigma_z`` long name; and MIROC also carries the sea-floor depth as
+    a second coordinate named ``depth``, which makes the lookup ambiguous. The
+    member would be dropped as missing data.
+
+    So: the vertical dimension coordinate (iris' Z-axis guess, else a known
+    vertical ``var_name``) gets ``standard_name = 'depth'``, and any other
+    coordinate that would answer to ``depth`` loses that standard name. Only
+    names change — never values or units (``layer_heat_content`` handles the
+    units). Anything ambiguous is left for ClimateEval to reject.
+    """
+    for cube in cubes:
+        if cube.var_name != var_name:
+            continue
+        vertical = cube.coords(axis="Z", dim_coords=True) or [
+            c for c in cube.dim_coords if c.var_name in _VERTICAL_VAR_NAMES
+        ]
+        if len(vertical) != 1:
+            continue
+        axis = vertical[0]
+        for other in cube.coords("depth"):
+            if other is not axis:
+                other.standard_name = None
+                other.long_name = f"{other.var_name or 'depth'} (not the vertical axis)"
+        if axis.name() != "depth":
+            axis.standard_name = "depth"
+
+
+class StagedMemberDataSource(ESMValToolIntakeDataSource):
+    """One staged comparison member (a subclass per member is generated).
+
+    Two differences from the upstream base, both about *where* and *how* the
+    staged files are read, never what is computed from them:
+
+    * the files are read from the staged root the member was **discovered**
+      in (``_staged_root``), falling back to the diagnostic's data root. Since
+      the v2 reference bundle lives apart from the staged ensemble
+      (``--data-root`` = references, ``$CLIMATEBENCH2_STAGED_CMIP6_ROOT`` =
+      ensemble), loading from the data root alone found no member at all and
+      every comparison source was reported as "would need to be downloaded";
+    * an ocean-level variable gets its vertical axis named the way ClimateEval
+      expects (:func:`normalise_vertical_names`) before ClimateEval checks it.
+    """
+
+    #: The staged root the member was found in (set per generated subclass).
+    _staged_root: ClassVar[Path | None] = None
+
+    def _get_data_dir(self, data_root_dir: Path, variable: Variable) -> Path:
+        """``<staged root>/<id>/<freq>/<var>`` if staged there, else the data root's."""
+        if self._staged_root is not None:
+            staged = Path(self._staged_root) / self.id / variable.frequency / variable.var_name
+            if staged.is_dir():
+                return staged
+        return super()._get_data_dir(data_root_dir, variable)
+
+    def get_cube(
+        self,
+        data_root_dir: Path | str,
+        variable: Variable,
+        *,
+        download_missing_data: bool = True,
+    ) -> Any:  # noqa: ANN401
+        """Load as upstream does; ocean-level fields get their axis renamed first."""
+        if variable.derived or not is_ocean_3d(variable):
+            return super().get_cube(
+                data_root_dir,
+                variable,
+                download_missing_data=download_missing_data,
+            )
+        from climateeval._utils import get_prepared_cube, load_cubes  # noqa: PLC0415
+        from climateeval.data._base import _paths_within_timerange  # noqa: PLC0415
+
+        paths = _paths_within_timerange(
+            sorted(self._get_data_dir(Path(data_root_dir), variable).glob("*.nc")),
+            variable.timerange,
+        )
+        if not paths:
+            return super().get_cube(
+                data_root_dir,
+                variable,
+                download_missing_data=download_missing_data,
+            )
+        cubes = load_cubes(paths)
+        normalise_vertical_names(cubes, variable.var_name)
+        return get_prepared_cube(cubes, variable)
+
+
 def clear_discovery_cache() -> None:
     """Forget the staged-root directory walk (used by the tests)."""
     _DISCOVERY_CACHE.clear()
@@ -208,7 +316,8 @@ def clear_discovery_cache() -> None:
 class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
     """CMIP6 historical+SSP2-4.5 comparison ensemble from a staged data root.
 
-    Yields one :class:`~climateeval.data._esmvaltool_intake.ESMValToolIntakeDataSource`
+    Yields one :class:`StagedMemberDataSource` (an
+    :class:`~climateeval.data._esmvaltool_intake.ESMValToolIntakeDataSource`)
     subclass per staged ``(model, member)`` that actually carries the variable,
     with
 
@@ -279,9 +388,10 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
             )
             yield type(
                 f"{self.__class__.__name__}DataSource",
-                (ESMValToolIntakeDataSource,),
+                (StagedMemberDataSource,),
                 {
                     "_information": information,
                     "esmvaltool_dataset_facets": facets,
+                    "_staged_root": root,
                 },
             )()
