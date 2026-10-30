@@ -712,6 +712,24 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         if not np.array_equal(points, coord.points):
             coord.points = points.astype(coord.dtype)
 
+    @staticmethod
+    def _on_levels(cube: Cube, levels: list[float]) -> Cube:
+        """``extract_levels(cube, levels, "linear")``, asked in the cube's own order.
+
+        ESMValCore's vertical *interpolation* returns NaN on every target
+        level when the targets run the opposite way to the source: CMIP6 and
+        ERA5 run top-down from 1000 hPa, and the ascending list this gate
+        holds left ERA5 with data on 1 of ICON-ESM-LR's 29 in-range levels
+        (it carries several ERA5 lacks, so the extraction interpolates). By
+        exact match the order never mattered, which is why every model on
+        ``plev19`` — a subset of ERA5's levels — was unaffected.
+        """
+        points = cube.coord("air_pressure").points
+        descending = points.size > 1 and points[0] > points[-1]
+        ordered = sorted(levels, reverse=bool(descending))
+        with setup_esmvaltool_config_and_logging():
+            return extract_levels(cube, ordered, "linear")
+
     @classmethod
     def _common_levels(cls, ta: Cube, hus: Cube) -> list[float]:
         """The pressure levels both profiles carry (Pa, ascending, ``ta``'s values).
@@ -756,8 +774,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         """
         present: dict[float, bool] = dict.fromkeys(levels, True)
         for cube in (ta, hus):
-            with setup_esmvaltool_config_and_logging():
-                cube = extract_levels(self._tropical_band(cube), levels, "linear")
+            cube = self._on_levels(self._tropical_band(cube), levels)
             axis = cube.coord_dims("air_pressure")[0]
             finite = np.isfinite(_filled(cube.data))
             others = tuple(i for i in range(finite.ndim) if i != axis)
@@ -830,8 +847,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         """
         if levels is None:
             levels = self._common_levels(ta, hus)
-        with setup_esmvaltool_config_and_logging():
-            ta, hus = (extract_levels(cube, levels, "linear") for cube in (ta, hus))
+        ta, hus = (self._on_levels(cube, levels) for cube in (ta, hus))
         axis = ta.coord_dims("air_pressure")[0]
         # The cube's OWN level order, never `levels`: `extract_levels` keeps a
         # file's order when the levels are a subset of its own, and CMIP6/ERA5

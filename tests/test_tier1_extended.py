@@ -669,23 +669,26 @@ def test_precip_buoyancy_matches_levels_within_a_tolerance(monkeypatch) -> None:
 
 
 def test_precip_buoyancy_drops_levels_above_the_reference_top(monkeypatch) -> None:  # noqa: ANN001
-    """ICON-ESM-LR's 3/5/7 Pa lie above ERA5's top: drop them on both sides.
+    """ICON-ESM-LR: levels above ERA5's top, and levels ERA5 does not carry.
 
-    The model carries one level above the reference's highest; the column is
-    integrated over the four shared levels on BOTH sides, so the model slope
-    is the four-level one and the gate row exists.
+    The model carries one level above the reference's highest (dropped on
+    both sides) and one inside its range that the reference lacks (700 hPa,
+    interpolated). Regression test: the interpolation was asked for the
+    levels in ascending order while the data run top-down, and ESMValCore
+    then returns NaN on every level — ICON-ESM-LR's reference had data on 1
+    of 29 levels and no gate row.
     """
-    model_plev = np.append(PLEV, 10000.0)
+    inside = np.array([100000.0, 85000.0, 70000.0, 50000.0, 25000.0])
     raw, _ = _run_against_observations(
         monkeypatch,
-        _model_on(model_plev),
+        _model_on(np.append(inside, 10000.0)),
         _observations(),
     )
-    assert raw["precip_buoyancy_n_levels"] == PLEV.size
+    expected = _expected_slope(plev=inside)
+    assert raw["precip_buoyancy_n_levels"] == inside.size
     assert raw["precip_buoyancy_levels_dropped"] == 1.0
-    assert raw["precip_buoyancy_top_level_pa"] == PLEV.min()
-    assert raw["precip_buoyancy_slope"] == pytest.approx(_expected_slope(), rel=0.02)
-    expected = _expected_slope()
+    assert raw["precip_buoyancy_top_level_pa"] == inside.min()
+    assert raw["precip_buoyancy_slope"] == pytest.approx(expected, rel=0.02)
     assert raw["precip_buoyancy_slope_ref"] == pytest.approx(expected, rel=0.02)
 
 
