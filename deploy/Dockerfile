@@ -63,7 +63,10 @@ ENV ESMVALTOOL_CONFIG_DIR=/opt/cb2/esmvaltool \
     OPENBLAS_NUM_THREADS=1 \
     MKL_NUM_THREADS=1
 
-RUN useradd --create-home --uid 1000 cb2 && mkdir -p /scratch && chown cb2 /scratch
+# ubuntu:24.04 ships a default `ubuntu` user with UID 1000; the Job's
+# securityContext runs as 1000, so that UID becomes `cb2`.
+RUN userdel --remove ubuntu 2>/dev/null || true; \
+    useradd --create-home --uid 1000 cb2 && mkdir -p /scratch && chown cb2 /scratch
 USER cb2
 WORKDIR /scratch
 
