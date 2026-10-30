@@ -88,6 +88,9 @@ Every row also carries a ``window`` label — ``held-out`` or ``in-sample`` —
 resolved from ``tier2.window_labels`` by (diagnostic, ``var_id``), which is
 the paper's §5.6 scorecard rule: the leaderboard states, per entry, whether
 the observations it was scored against predate the reserved test period.
+Every Tier II row also carries ``variable_status`` — ``core`` or ``extended``
+(paper Table 2), from ``tier2.variable_status`` — which the leaderboard uses
+to show the Extended entries apart.
 
 Rows are appended to the diagnostic's own ``metrics`` table (never a new
 schema): missing columns are added with ``ALTER TABLE ADD COLUMN``, and every
@@ -265,6 +268,8 @@ _SCORE_COLUMNS: dict[str, str] = {
     "reason": "VARCHAR",
     # Held-out / in-sample (paper §5.6), from `tier2.window_labels`.
     "window": "VARCHAR",
+    # Core / extended (paper Table 2), from `tier2.variable_status`.
+    "variable_status": "VARCHAR",
     "crps": "DOUBLE",
     "crps_se": "DOUBLE",
     "crps_ci_lo": "DOUBLE",
@@ -790,6 +795,49 @@ def window_label(diagnostic: str, var_id: str) -> str:
     return str(table["default"])
 
 
+#: ``tier2.variable_status`` tags (paper Table 2).
+STATUS_CORE = "core"
+STATUS_EXTENDED = "extended"
+VARIABLE_STATUS_TAGS = (STATUS_CORE, STATUS_EXTENDED)
+
+
+def variable_status(diagnostic: str, var_id: str) -> str:
+    """``core`` / ``extended`` for one Tier II entry (paper Table 2).
+
+    Resolved from ``tier2.variable_status`` exactly as :func:`window_label`
+    resolves ``tier2.window_labels``: a ``var_ids`` entry wins over a
+    ``diagnostics`` entry (the suite entry name), anything unlisted takes
+    ``default``, and a consistency row inherits the tag of the variable it
+    tests. Presentation metadata only — no score depends on it, which is why
+    it is outside the frozen-comparison fingerprint.
+
+    Raises
+    ------
+    ValueError
+        If the tag is not one of :data:`VARIABLE_STATUS_TAGS`.
+    """
+    table = get_threshold("tier2.variable_status")
+    by_var = table.get("var_ids") or {}
+    candidates = [str(var_id)]
+    for suffix in (TREND_CONSISTENCY_SUFFIX, SCALAR_CONSISTENCY_SUFFIX):
+        if str(var_id).endswith(suffix):
+            candidates.append(str(var_id)[: -len(suffix)])
+    tag = None
+    for candidate in candidates:
+        if candidate in by_var:
+            tag = by_var[candidate]
+            break
+    if tag is None:
+        tag = (table.get("diagnostics") or {}).get(diagnostic, table["default"])
+    if tag not in VARIABLE_STATUS_TAGS:
+        msg = (
+            f"Unknown Tier II status '{tag}' for ({diagnostic}, {var_id}) in "
+            f"tier2.variable_status (expected one of {VARIABLE_STATUS_TAGS})"
+        )
+        raise ValueError(msg)
+    return str(tag)
+
+
 def is_perfect_model(
     raw_df: pd.DataFrame,
     categories: dict[str, str],
@@ -813,13 +861,25 @@ def _apply_window_labels(
     *,
     perfect_model: bool = False,
 ) -> None:
-    """Stamp the held-out / in-sample / perfect-model label, in place."""
+    """Stamp the window label and the Core/Extended status, in place.
+
+    ``window``: held-out / in-sample / perfect-model (``tier2.window_labels``).
+    ``variable_status``: core / extended (``tier2.variable_status``), on the
+    Tier II rows only — a gate-shaped row of another tier (the III.2
+    large-ensemble spread test) is left blank.
+    """
     for row in rows:
+        var_id = str(row.get("var_id", ""))
         row["window"] = (
             WINDOW_PERFECT_MODEL
             if perfect_model
-            else window_label(diagnostic, str(row.get("var_id", "")))
+            else window_label(diagnostic, var_id)
         )
+        tier = row.get("tier")
+        if isinstance(tier, str) and tier and tier != "II":
+            row["variable_status"] = ""
+        else:
+            row["variable_status"] = variable_status(diagnostic, var_id)
 
 
 # ---------------------------------------------------------------------------

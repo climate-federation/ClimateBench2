@@ -23,6 +23,9 @@ protocol's presentation:
   badged with the ``window`` label the pass writes (paper §5.6): held-out
   entries are scored against observations from the reserved post-2015 test
   period, in-sample ones against the historical record.
+  Paper Table 2's **Extended** entries (OHC, surface fluxes, cloud
+  properties, ``prw``) get a table of their own below the **Core** one, by
+  the ``variable_status`` tag the pass writes (``tier2.variable_status``).
 - **Tier II distribution skill** — the **Perkins score** of the daily PDFs
   (work package 6b), in its own table because it is a skill in [0, 1]
   rather than an error: it never enters ``E_ref`` or the headline
@@ -44,6 +47,7 @@ from typing import TYPE_CHECKING
 from climatebench2.scoring_pass import (
     CLIMATOLOGY_DATA_ID,
     SCORER,
+    STATUS_EXTENDED,
     TIER3_SCORER,
     WINDOW_HELD_OUT,
     WINDOW_IN_SAMPLE,
@@ -637,11 +641,9 @@ def _skill_cell(row: pd.Series, clim_crps: float) -> str:
     return f"<td class='{cls}' title='{_esc('; '.join(tip))}'>{text}{small}</td>"
 
 
-def _crps_table_html(crps: pd.DataFrame) -> str:
+def _skill_table_html(crps: pd.DataFrame) -> str:
+    """One Tier II skill table (models x variables) for the given rows."""
     import numpy as np
-
-    if crps.empty:
-        return "<p class='na'>No Tier II CRPS scores in the given databases.</p>"
 
     # One record per (model, variable); a variable scored by several
     # diagnostics keeps the first row rather than averaging incomparable
@@ -719,6 +721,62 @@ def _crps_table_html(crps: pd.DataFrame) -> str:
     )
 
     return (
+        f"<table><thead><tr><th>Model</th>{header}</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
+    )
+
+
+def variable_statuses(crps: pd.DataFrame) -> dict[str, str]:
+    """``var_id -> core | extended`` (paper Table 2).
+
+    From the pass's ``variable_status`` column; a row without one (a database
+    scored before the column existed) is resolved from
+    ``tier2.variable_status`` by its (diagnostic, ``var_id``). A variable
+    keeps the first tag seen.
+    """
+    from climatebench2.scoring_pass import variable_status
+
+    labels: dict[str, str] = {}
+    if crps.empty:
+        return labels
+    stored = (
+        crps["variable_status"]
+        if "variable_status" in crps.columns
+        else [None] * len(crps)
+    )
+    diagnostics = (
+        crps["diagnostic"] if "diagnostic" in crps.columns else [""] * len(crps)
+    )
+    for var_id, tag, diagnostic in zip(crps["var_id"], stored, diagnostics, strict=True):
+        if str(var_id) in labels:
+            continue
+        labels[str(var_id)] = (
+            tag
+            if isinstance(tag, str) and tag
+            else variable_status(str(diagnostic), str(var_id))
+        )
+    return labels
+
+
+def _crps_table_html(crps: pd.DataFrame) -> str:
+    if crps.empty:
+        return "<p class='na'>No Tier II CRPS scores in the given databases.</p>"
+
+    statuses = variable_statuses(crps)
+    is_extended = crps["var_id"].astype(str).map(statuses) == STATUS_EXTENDED
+    tables = []
+    if (~is_extended).any():
+        tables.append(
+            "<h3>Core entries</h3>" + _skill_table_html(crps[~is_extended]),
+        )
+    if is_extended.any():
+        tables.append(
+            "<h3>Extended entries</h3>"
+            "<p>Paper Table 2's Extended variables: reported and scored the "
+            "same way, but outside the Core set.</p>"
+            + _skill_table_html(crps[is_extended]),
+        )
+    return (
         "<p>Headline skill <strong>S = 1 − E/E_ref</strong> per variable, "
         "where E is the <strong>fair CRPS</strong> of the model's ensemble and "
         "E_ref the <strong>median</strong> fair CRPS across the CMIP6 "
@@ -737,9 +795,16 @@ def _crps_table_html(crps: pd.DataFrame) -> str:
         "record the models were developed with — a climatology, a seasonal or "
         "diurnal cycle, an extremes index or a historical event. Only the "
         "held-out entries are out-of-sample evidence.</p>"
-        f"<table><thead><tr><th>Model</th>{header}</tr></thead>"
-        f"<tbody>{''.join(body)}</tbody></table>"
+        "<p>Entries are split as in paper Table 2: <strong>Core</strong> "
+        "(2 m temperature and its daily extremes, sea surface temperature, "
+        "precipitation mean and extremes, TOA fluxes and CRE, sea ice) and, "
+        "in their own table, <strong>Extended</strong> (ocean heat content, "
+        "surface fluxes, cloud properties, water vapour path) — "
+        "<code>tier2.variable_status</code>.</p>"
+        + "".join(tables)
     )
+
+
 
 
 def _distribution_table_html(distribution: pd.DataFrame) -> str:
@@ -800,6 +865,7 @@ def _consistency_table_html(consistency: pd.DataFrame) -> str:
         "data_id",
         "var_id",
         "window",
+        "variable_status",
         "value",
         "z",
         "p_value",

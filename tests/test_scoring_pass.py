@@ -508,6 +508,72 @@ def test_window_label_resolution_order() -> None:
     assert label("some_new_diagnostic", "anything") == "held-out"
 
 
+def test_variable_status_follows_paper_table_2() -> None:
+    """Core vs Extended (paper Table 2; OHC Extended, ratified 2026-10-30)."""
+    status = scoring_pass.variable_status
+    for var_id in (
+        "tas", "tos", "pr", "rsut", "rlut", "rtnt", "rsutcs", "rlutcs",
+        "swcre", "lwcre", "siconc_nh_sep_extent", "siconc_sh_feb_extent",
+    ):
+        assert status("annual_mean_timeseries", var_id) == "core", var_id
+    for var_id in ("clt", "clwvi", "clivi", "prw"):
+        assert status("annual_mean_timeseries", var_id) == "extended", var_id
+        assert status("eof_projection", var_id) == "extended", var_id
+    for var_id in ("phcint_total", "phcint_2000m", "phcint_100m"):
+        assert status("ohc", var_id) == "extended", var_id
+    # The whole OHC entry is Extended, whatever its layer is called ...
+    assert status("ohc", "some_new_layer") == "extended"
+    # ... a consistency row inherits its variable's tag ...
+    assert status("annual_mean_timeseries", "prw_trend_consistency") == "extended"
+    assert status("annual_mean_timeseries", "tas_trend_consistency") == "core"
+    # ... and unlisted Core entries (daily extremes, events) take the default.
+    assert status("pr_extremes_series", "rx1day_global_land") == "core"
+    assert status("extremes", "txx_global_land") == "core"
+    assert status("realized_warming_level", "gmst_warming_level") == "core"
+
+
+def test_variable_status_rejects_an_unknown_tag(monkeypatch) -> None:  # noqa: ANN001
+    real = scoring_pass.get_threshold
+
+    def thresholds(path: str):  # noqa: ANN202
+        if path == "tier2.variable_status":
+            return {"default": "core", "var_ids": {"tas": "optional"}}
+        return real(path)
+
+    monkeypatch.setattr(scoring_pass, "get_threshold", thresholds)
+    with pytest.raises(ValueError, match="optional"):
+        scoring_pass.variable_status("annual_mean_timeseries", "tas")
+
+
+def test_variable_status_is_not_part_of_the_bundle_fingerprint() -> None:
+    """Presentation, not data: re-tagging must never invalidate a bundle."""
+    from climatebench2 import frozen_comparison
+
+    assert "tier2.variable_status" not in frozen_comparison.PROTOCOL_THRESHOLDS
+    assert not any(
+        key.startswith("tier2.variable_status")
+        for key in frozen_comparison.PROTOCOL_THRESHOLDS
+    )
+
+
+def test_every_scored_row_carries_its_variable_status() -> None:
+    raw, sources = _tables(np.random.default_rng(41))
+    rows = pd.DataFrame(
+        score_raw_output(
+            raw,
+            sources,
+            settings=FAST,
+            diagnostic="annual_mean_timeseries",
+        ),
+    )
+    assert set(rows["variable_status"]) == {scoring_pass.STATUS_CORE}
+    rows = pd.DataFrame(
+        score_raw_output(raw, sources, settings=FAST, diagnostic="ohc"),
+    )
+    # `tas` is listed Core by var_id, which wins over the `ohc` entry's tag
+    assert set(rows["variable_status"]) == {scoring_pass.STATUS_CORE}
+
+
 # ---------------------------------------------------------------------------
 # The pattern-scaling baseline (work package 6b)
 # ---------------------------------------------------------------------------

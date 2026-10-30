@@ -146,6 +146,54 @@ def test_skill_table_without_a_window_column_defaults_to_held_out(  # noqa: ANN0
     assert "held-out" in render_html(scores)
 
 
+def test_skill_table_shows_extended_entries_apart(synthetic_db) -> None:  # noqa: ANN001
+    """Paper Table 2: Extended entries (here `prw`) get their own table."""
+    from climatebench2.leaderboard import variable_statuses
+
+    scores = build_scores([synthetic_db])
+    extended = scores.crps.copy()
+    extended["var_id"] = "prw"
+    extended["variable_status"] = "extended"
+    scores.crps["variable_status"] = "core"
+    scores.crps = pd.concat([scores.crps, extended], ignore_index=True)
+
+    assert variable_statuses(scores.crps) == {"tas": "core", "prw": "extended"}
+    html = render_html(scores)
+    core_at, extended_at = html.index("Core entries"), html.index("Extended entries")
+    assert core_at < html.index(">tas<") < extended_at < html.index(">prw<")
+
+
+def test_skill_table_resolves_the_status_of_an_older_database(  # noqa: ANN001
+    synthetic_db,
+) -> None:
+    """No `variable_status` column: resolved from thresholds.yml instead."""
+    from climatebench2.leaderboard import variable_statuses
+
+    scores = build_scores([synthetic_db])
+    assert "variable_status" not in scores.crps.columns
+    clouds = scores.crps.copy()
+    clouds["var_id"] = "clt"
+    ohc = scores.crps.copy()
+    ohc["var_id"] = "phcint_total"
+    ohc["diagnostic"] = "ohc"
+    scores.crps = pd.concat([scores.crps, clouds, ohc], ignore_index=True)
+    assert variable_statuses(scores.crps) == {
+        "tas": "core",
+        "clt": "extended",
+        "phcint_total": "extended",
+    }
+    html = render_html(scores)
+    assert html.index(">tas<") < html.index("Extended entries") < html.index(">clt<")
+
+
+def test_skill_table_without_extended_entries_has_no_extended_table(  # noqa: ANN001
+    synthetic_db,
+) -> None:
+    html = render_html(build_scores([synthetic_db]))
+    assert "Core entries" in html
+    assert "Extended entries" not in html
+
+
 def test_render_html_clips_the_displayed_skill(synthetic_db) -> None:  # noqa: ANN001
     """S is unbounded below; the paper clips the display at -1."""
     scores = build_scores([synthetic_db])

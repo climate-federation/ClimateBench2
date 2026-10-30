@@ -459,6 +459,60 @@ tier2:
       pinatubo_rsds_anom: in-sample
       nh_minus_sh_trend: in-sample
       itcz_shift_deg_per_decade: in-sample
+  # CORE vs EXTENDED Tier II entries (paper Table 2). Core: 2 m temperature
+  # (incl. daily temperature extremes), surface temperature (sea surface
+  # temperature `tos`; MERRA-2 `ts` left the v2 protocol on 2026-10-27),
+  # precipitation mean and extremes, TOA fluxes and CRE, sea ice. Extended:
+  # OHC (RATIFIED 2026-10-30, Duncan), surface fluxes, cloud properties
+  # (clt/clwvi/clivi) and vertically integrated water vapour (prw).
+  #
+  # PRESENTATION, NOT DATA: the scoring pass stamps the tag on every Tier II
+  # row it writes (`variable_status`) and the leaderboard shows Extended
+  # entries apart from Core ones; no score, E_ref or comparison row depends
+  # on it, so it is deliberately NOT in frozen_comparison.PROTOCOL_THRESHOLDS
+  # (a change here never invalidates a frozen comparison bundle).
+  #
+  # Resolved like `window_labels`: a `var_ids` entry wins over a
+  # `diagnostics` entry (the suite entry name = the DuckDB schema), anything
+  # unlisted takes `default`, and a `<var>_trend_consistency` /
+  # `<var>_consistency` row inherits the tag of the variable it tests.
+  # Unlisted Core entries (the ETCCDI indices, the Rx1day/Rx5day series, the
+  # events and seasonal-cycle diagnostics) take the default.
+  variable_status:
+    default: core
+    diagnostics:
+      ohc: extended
+    var_ids:
+      # Core
+      tas: core
+      tos: core
+      pr: core
+      rsut: core
+      rlut: core
+      rtnt: core
+      rsutcs: core
+      rlutcs: core
+      swcre: core
+      lwcre: core
+      siconc_nh_sep_extent: core
+      siconc_sh_feb_extent: core
+      # Extended: ocean heat content (the `ohc` entry's layers)
+      phcint_total: extended
+      phcint_2000m: extended
+      phcint_100m: extended
+      # Extended: cloud properties
+      clt: extended
+      clwvi: extended
+      clivi: extended
+      # Extended: vertically integrated water vapour
+      prw: extended
+      # Extended: surface fluxes (in paper Table 2, not yet scored in v2)
+      hfls: extended
+      hfss: extended
+      rsds: extended
+      rsus: extended
+      rlds: extended
+      rlus: extended
   # Regime (c): ensemble-consistency test
   consistency_p_value: 0.05            # two-sided
   eof_modes: 5                         # spatial fields: leading EOFs tested
