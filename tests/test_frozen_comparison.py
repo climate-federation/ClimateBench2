@@ -783,6 +783,19 @@ def test_frozen_run_has_the_comparison_rows_but_never_loaded_them(e2e) -> None: 
     assert manifest["nominal_timerange"] == WINDOW
     assert manifest["notes"] == {"source": "test"}
     assert len(manifest["sources"]) == 2
+    # Sources are labelled by run directory and file, never by machine path.
+    for source in manifest["sources"]:
+        assert not source["path"].startswith("/")
+        assert source["path"].count("/") == 1
+        assert str(root) not in source["path"]
+    assert str(root) not in (bundle / fc.MANIFEST).read_text()
+
+
+def test_source_label_is_the_run_directory_and_file() -> None:
+    assert (
+        fc.source_label(Path("/scratch/x/runs/tas/ClimateBench2_TierII.ddb"))
+        == "tas/ClimateBench2_TierII.ddb"
+    )
 
 
 def test_frozen_run_fails_fast_on_a_provenance_mismatch(cli, e2e) -> None:  # noqa: ANN001

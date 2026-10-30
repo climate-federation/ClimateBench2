@@ -88,7 +88,8 @@ silently meaningless, so these are checked and a mismatch is an error:
   own record, not the freezer's claim.
 
 The CB2 and ClimateEval commits of the freezer are recorded, as are the
-source databases' paths, sizes and hashes and free-form ``notes`` (e.g. the
+source databases' labels (run directory and file name, never a machine path:
+:func:`source_label`), sizes and hashes and free-form ``notes`` (e.g. the
 commits the source runs used, from their job logs); a ClimateEval version
 difference is reported, not fatal.
 
@@ -732,6 +733,15 @@ def _entry_summary(
     }
 
 
+def source_label(db: Path) -> str:
+    """``<run directory>/<file>`` of a source database, e.g. ``tas/ClimateBench2_TierII.ddb``.
+
+    What the manifest records instead of the absolute path, which would leak
+    the freezing machine's file system into a published bundle.
+    """
+    return f"{db.parent.name}/{db.name}" if db.parent.name else db.name
+
+
 def default_excluded_variables() -> list[str]:
     """Variables a bundle leaves out unless asked (``tier2.frozen_comparison``)."""
     return [str(v) for v in get_threshold("tier2.frozen_comparison.exclude_variables")]
@@ -847,7 +857,10 @@ def freeze(  # noqa: C901, PLR0912, PLR0913, PLR0915
             stem = db.stem
             manifest["sources"].append(
                 {
-                    "path": str(db),
+                    # The run directory and file name only: a bundle is a
+                    # public artefact, so no machine path goes into it. The
+                    # sha256 identifies the database exactly.
+                    "path": source_label(db),
                     "database": stem,
                     "size": db.stat().st_size,
                     "sha256": _sha256(db),
