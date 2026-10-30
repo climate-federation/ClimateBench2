@@ -10,10 +10,12 @@ result directory:
 3. the **submission**: one directory per experiment under the model URI, the
    Tier II ensemble under ``historical-ssp245/<member>/``, e.g.::
 
-       s3://bucket/MyModel/historical-ssp245/r1i1p1f1/*.nc
-       s3://bucket/MyModel/historical-ssp245/r2i1p1f1/*.nc
-       s3://bucket/MyModel/piControl/*.nc
-       s3://bucket/MyModel/abrupt-4xCO2/*.nc
+       gs://climatebench-submissions/MyModel/historical-ssp245/r1i1p1f1/*.nc
+       gs://climatebench-submissions/MyModel/historical-ssp245/r2i1p1f1/*.nc
+       gs://climatebench-submissions/MyModel/piControl/*.nc
+       gs://climatebench-submissions/MyModel/abrupt-4xCO2/*.nc
+
+   (an ``s3://`` prefix or a local path works the same way).
 
    Experiment directory names map to ``--experiment`` keys through the
    profile; absent experiments only skip the gates that need them.
@@ -22,12 +24,18 @@ What must be identical between submissions (window, suites, bundle URIs) is
 the *profile* (``deploy/profiles/<name>.yml``), recorded in ``run.json`` with
 the software versions so every result says what it was scored against.
 
-URIs: ``s3://`` goes through ``s5cmd`` (the pod's IAM role); ``gs://`` is read
-anonymously over the public JSON API (``gs://climatebench`` is public-read)
-and written through GCS's S3-compatible API with an HMAC key; anything else is
-a local path. Results default to ``gs://climatebench/v2/results/``. Only the
-standard library is used here; ``climatebench2`` runs as a subprocess in the
-image's pixi environment.
+URIs: ``s3://`` goes through ``s5cmd`` with the pod's AWS credentials (an
+IRSA role, if any). ``gs://`` goes through ``s5cmd`` against GCS's
+S3-compatible XML API, authenticated with a service account's HMAC key
+(``$GCS_HMAC_ACCESS_ID`` / ``$GCS_HMAC_SECRET``, the ``cb2-gcs-hmac``
+Secret), for **writing** results and for **reading the submission** from a
+private bucket (``gs://climatebench-submissions``). The public bundles
+(references and comparison, in public-read ``gs://climatebench``) are read
+**anonymously** over the JSON API by default, so the key needs no read right
+there; a ``gs://`` submission is read anonymously too when no key is set.
+Anything else is a local path. Results default to
+``gs://climatebench/v2/results/``. Only the standard library is used here;
+``climatebench2`` runs as a subprocess in the image's pixi environment.
 """
 
 from __future__ import annotations
@@ -50,6 +58,10 @@ from typing import Any
 
 PROFILE_DIR = Path(os.environ.get("CB2_PROFILE_DIR", "/opt/cb2/profiles"))
 GCS_API = "https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+#: GCS's S3-compatible (XML API) endpoint, used with an HMAC key.
+GCS_S3_ENDPOINT = "https://storage.googleapis.com"
+#: Environment variables holding the GCS HMAC key (the ``cb2-gcs-hmac`` Secret).
+GCS_HMAC_ENV = ("GCS_HMAC_ACCESS_ID", "GCS_HMAC_SECRET")
 GCS_MEDIA = "https://storage.googleapis.com/{bucket}/{name}"
 VARIANT_RE = re.compile(r"^r\d+i\d+p\d+f\d+$")
 
@@ -122,8 +134,58 @@ def _gcs_get(bucket: str, name: str, dest: Path, size: int) -> None:
     raise RuntimeError(msg)
 
 
-def fetch(uri: str, dest: Path, *, workers: int = 16) -> Path:
-    """Copy everything under ``uri`` into ``dest`` (a local path is linked)."""
+def gcs_hmac_env(environ: dict[str, str] | None = None) -> dict[str, str] | None:
+    """The environment for ``s5cmd`` against GCS, or None without an HMAC key.
+
+    The one place the HMAC key is read, for reads and writes alike: GCS's
+    S3-compatible API takes the key as AWS-style static credentials. A key
+    with only one of its two halves set is an error, not "no key".
+    """
+    environ = dict(os.environ if environ is None else environ)
+    access_id, secret = (environ.get(name, "") for name in GCS_HMAC_ENV)
+    if not access_id and not secret:
+        return None
+    if not (access_id and secret):
+        missing = GCS_HMAC_ENV[0] if not access_id else GCS_HMAC_ENV[1]
+        msg = f"incomplete GCS HMAC key: {missing} is not set"
+        raise SystemExit(msg)
+    return environ | {
+        "AWS_ACCESS_KEY_ID": access_id,
+        "AWS_SECRET_ACCESS_KEY": secret,
+        "AWS_REGION": "auto",
+    }
+
+
+def s5cmd(scheme: str, *args: str, workers: int | None = None) -> tuple[list[str], dict[str, str] | None]:
+    """``(argv, env)`` of an ``s5cmd`` call on ``s3://`` or (via HMAC) ``gs://``.
+
+    ``gs://`` objects are addressed as ``s3://<bucket>/...`` against
+    :data:`GCS_S3_ENDPOINT`; without an HMAC key that is an error.
+    """
+    cmd = ["s5cmd"]
+    env = None
+    if scheme == "gs":
+        env = gcs_hmac_env()
+        if env is None:
+            msg = (
+                f"gs:// through s5cmd needs {GCS_HMAC_ENV[0]} and {GCS_HMAC_ENV[1]} "
+                "(a GCS HMAC key; the cb2-gcs-hmac Secret)"
+            )
+            raise SystemExit(msg)
+        cmd += ["--endpoint-url", GCS_S3_ENDPOINT]
+    if workers is not None:
+        cmd += ["--numworkers", str(workers)]
+    return [*cmd, *args], env
+
+
+def fetch(uri: str, dest: Path, *, workers: int = 16, private: bool = False) -> Path:
+    """Copy everything under ``uri`` into ``dest`` (a local path is linked).
+
+    ``private`` marks a ``gs://`` input that may sit in a private bucket (the
+    submission): it is read through ``s5cmd`` with the HMAC key when one is
+    set. Otherwise — and always for the public bundles — ``gs://`` is read
+    anonymously over the JSON API, which needs no credentials at all.
+    """
     scheme, bucket, prefix = split_uri(uri)
     if not scheme:
         src = Path(prefix).resolve()
@@ -134,12 +196,11 @@ def fetch(uri: str, dest: Path, *, workers: int = 16) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     if prefix and not prefix.endswith("/"):
         prefix += "/"
-    log(f"fetching {uri} -> {dest}")
-    if scheme == "s3":
-        subprocess.run(
-            ["s5cmd", "--numworkers", str(workers), "cp", f"s3://{bucket}/{prefix}*", f"{dest}/"],
-            check=True,
-        )
+    authenticated = scheme == "s3" or (private and gcs_hmac_env() is not None)
+    log(f"fetching {uri} -> {dest}" + (" (anonymous)" if not authenticated else ""))
+    if authenticated:
+        cmd, env = s5cmd(scheme, "cp", f"s3://{bucket}/{prefix}*", f"{dest}/", workers=workers)
+        subprocess.run(cmd, check=True, env=env)
         return dest
     items = [i for i in _gcs_list(bucket, prefix) if not i["name"].endswith("/")]
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -150,35 +211,26 @@ def fetch(uri: str, dest: Path, *, workers: int = 16) -> Path:
         for future in concurrent.futures.as_completed(futures):
             future.result()
     log(f"fetched {len(items)} objects from {uri}")
+    if not items:
+        hint = " (a private bucket needs the GCS HMAC key)" if private else ""
+        msg = f"no objects under {uri}{hint}"
+        raise SystemExit(msg)
     return dest
 
 
 def upload(src: Path, uri: str) -> None:
     """Copy ``src`` to ``uri`` (gs://, s3:// or a local directory).
 
-    ``gs://`` goes through GCS's S3-compatible XML API with an HMAC key of a
-    service account that may write the results prefix, passed as
-    ``$GCS_HMAC_ACCESS_ID`` / ``$GCS_HMAC_SECRET`` (a Kubernetes Secret).
+    ``gs://`` goes through GCS's S3-compatible XML API with the HMAC key of a
+    service account that may write the results prefix (:func:`gcs_hmac_env`).
     """
     scheme, bucket, prefix = split_uri(uri)
     if not scheme:
         shutil.copytree(src, Path(prefix), dirs_exist_ok=True)
         return
     prefix = prefix.rstrip("/")
-    cmd = ["s5cmd"]
-    env = None
-    if scheme == "gs":
-        try:
-            env = os.environ | {
-                "AWS_ACCESS_KEY_ID": os.environ["GCS_HMAC_ACCESS_ID"],
-                "AWS_SECRET_ACCESS_KEY": os.environ["GCS_HMAC_SECRET"],
-                "AWS_REGION": "auto",
-            }
-        except KeyError as err:
-            msg = f"writing to gs:// needs {err.args[0]} (a GCS HMAC key for the results bucket)"
-            raise SystemExit(msg) from err
-        cmd += ["--endpoint-url", "https://storage.googleapis.com"]
-    subprocess.run([*cmd, "cp", f"{src}/", f"s3://{bucket}/{prefix}/"], check=True, env=env)
+    cmd, env = s5cmd(scheme, "cp", f"{src}/", f"s3://{bucket}/{prefix}/")
+    subprocess.run(cmd, check=True, env=env)
 
 
 def verify_manifest(root: Path, *, workers: int = 8) -> int:
@@ -275,7 +327,11 @@ def software_versions() -> dict[str, str]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--model-uri", required=True, help="Submission root (s3://, gs:// or a local path).")
+    p.add_argument(
+        "--model-uri",
+        required=True,
+        help="Submission root: gs://<private-bucket>/<model>/ (read with the GCS HMAC key), s3:// or a local path.",
+    )
     p.add_argument("--name", required=True, help="Model name recorded in the results.")
     p.add_argument(
         "--output-uri",
@@ -317,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         if profile.get("verify_references", True) and not args.no_verify:
             log(f"verified {verify_manifest(refs)} reference files")
         comparison = fetch(comp_uri, work / "comparison")
-        model = fetch(args.model_uri, work / "model")
+        model = fetch(args.model_uri, work / "model", private=True)
 
         members, experiments = discover(model, profile)
         if len(members) > args.max_members:

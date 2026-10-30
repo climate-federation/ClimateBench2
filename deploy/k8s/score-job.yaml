@@ -1,7 +1,10 @@
 # Score one submission: a Kubernetes Job running the cb2-run entrypoint.
 #
-# Fill in the four values marked <...> (or use deploy/submit.sh, which does it
-# from the command line) and apply:
+# Fill in the values marked <...> (or use deploy/submit.sh, which does it from
+# the command line) and apply. <MODEL_URI> is normally the submission's
+# directory in the private bucket, gs://climatebench-submissions/<model>/
+# (read with the HMAC key below); an s3:// URI (read with the service
+# account's IRSA role) or a path inside the pod also works.
 #   kubectl -n climatebench create -f score-job.yaml
 #
 # Sizing: references (~34 GB), the frozen comparison bundle (<0.1 GB) and the
@@ -47,10 +50,12 @@ spec:
               value: ghcr.io/climate-federation/climatebench2:<IMAGE_TAG>
             - name: DASK_NUM_WORKERS
               value: "8"
-            # HMAC key of a GCP service account with object create rights on
-            # gs://climatebench/v2/results/ (kubectl -n climatebench create
-            # secret generic cb2-gcs-hmac --from-literal=access_id=...
-            # --from-literal=secret=...).
+            # HMAC key of the GCP service account cb2-scorer (objectViewer on
+            # gs://climatebench-submissions, objectCreator on
+            # gs://climatebench/v2/results/). One key serves both reading the
+            # submission and writing the results; the public bundles are read
+            # anonymously. (kubectl -n climatebench create secret generic
+            # cb2-gcs-hmac --from-literal=access_id=... --from-literal=secret=...)
             - name: GCS_HMAC_ACCESS_ID
               valueFrom:
                 secretKeyRef: {name: cb2-gcs-hmac, key: access_id}

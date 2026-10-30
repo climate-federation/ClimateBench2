@@ -17,17 +17,31 @@ exactly.
 |---|---|---|
 | Reference bundle `v2` (`<source id>/<frequency>/<var>/*.nc`, `MANIFEST.json`) | `gs://climatebench/v2/references/` | ~34 GB (OHC reads the IAP and EN4 `thetao`; their precomputed `phcint`, 6.7 GB, is no longer read) |
 | Frozen comparison bundle `v2` (`*.ddb`, `manifest.json`) | `gs://climatebench/v2/comparison/` | <0.1 GB |
-| The submission | any `s3://` prefix | 10–300 GB |
+| The submission | `gs://climatebench-submissions/<model>/` (private; an `s3://` prefix or a local path also works) | 10–300 GB |
 
-`gs://climatebench` is public-read, so both bundles are fetched anonymously.
-Results are written to `gs://climatebench/v2/results/<name>/<UTC timestamp>/`
-through GCS's S3-compatible API. That needs an HMAC key for a service account
-that may create objects there, stored as the Kubernetes Secret `cb2-gcs-hmac`.
+`gs://climatebench` is public-read, so both bundles are always fetched
+anonymously over the GCS JSON API: a run needs no read right on it.
+
+Submissions live in the **private** bucket `gs://climatebench-submissions`
+(uniform access, public access prevented). The runner reads it, and writes the
+results to `gs://climatebench/v2/results/<name>/<UTC timestamp>/`, through
+GCS's S3-compatible API (`s5cmd --endpoint-url https://storage.googleapis.com`)
+with **one HMAC key**: that of the service account
+`cb2-scorer@fluid-script-453604-u5.iam.gserviceaccount.com`, which has
+`objectViewer` on the submissions bucket and `objectCreator` on
+`gs://climatebench` restricted to `v2/results/`. The key is held as the
+Kubernetes Secret `cb2-gcs-hmac` (`access_id`, `secret`) and reaches the pod as
+`$GCS_HMAC_ACCESS_ID` / `$GCS_HMAC_SECRET`; never commit it. Without a key a
+`gs://` submission is read anonymously (a public bucket only) and the upload
+fails.
+
+`s3://` submissions remain supported: they are read with `s5cmd` using the
+pod's AWS credentials (an IRSA role on EKS, see `k8s/base.yaml`).
 
 ## Submission layout
 
 ```
-s3://bucket/MyModel/
+gs://climatebench-submissions/MyModel/
 ├── historical-ssp245/       # Tier II ensemble, one directory per member (up to 10 are scored)
 │   ├── r1i1p1f1/*.nc        # CMOR-like NetCDF, historical + SSP2-4.5 spliced, Amon/Omon/SImon/day
 │   └── r2i1p1f1/*.nc
@@ -92,10 +106,11 @@ docker run --rm -v $PWD/scratch:/scratch climatebench2:dev \
 On EKS:
 
 ```bash
-kubectl apply -f deploy/k8s/base.yaml          # namespace + IRSA service account (edit the role ARN)
+kubectl apply -f deploy/k8s/base.yaml          # namespace + service account
 kubectl -n climatebench create secret generic cb2-gcs-hmac \
-    --from-literal=access_id=GOOG1E... --from-literal=secret=...
-deploy/submit.sh MyModel s3://subs/MyModel/ main
+    --from-literal=access_id=GOOG1E... --from-literal=secret=...   # the cb2-scorer HMAC key
+deploy/submit.sh MyModel gs://climatebench-submissions/MyModel/ 2.0.0
+deploy/submit.sh MyModel s3://my-bucket/MyModel/ 2.0.0   # S3: needs the IRSA role in base.yaml
 ```
 
 Each run uploads `gs://climatebench/v2/results/<name>/<UTC timestamp>/` (or `--output-uri`), which contains:

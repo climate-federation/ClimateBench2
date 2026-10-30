@@ -10,8 +10,11 @@ description: >-
   Ocean heat content is scored from the submission's `thetao`.
 
 # Object-storage locations. The bundles are read anonymously from the public
-# bucket; results are written there with a GCS HMAC key (cb2_run.upload).
-# Override per run with --references-uri / --comparison-uri / --output-uri.
+# bucket (no read right needed); results are written there, and a submission in
+# the private gs://climatebench-submissions/<model>/ is read, with the one GCS
+# HMAC key of the cb2-gcs-hmac Secret (cb2_run.gcs_hmac_env). The submission
+# URI is per run (--model-uri). Override the rest per run with
+# --references-uri / --comparison-uri / --output-uri.
 references_uri: gs://climatebench/v2/references/
 comparison_uri: gs://climatebench/v2/comparison/
 results_uri: gs://climatebench/v2/results/

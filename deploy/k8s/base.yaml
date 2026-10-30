@@ -1,11 +1,15 @@
 # One-off cluster setup for ClimateBench v2 scoring on EKS.
 #
-# The service account is bound to an IAM role (IRSA) that may READ the
-# submission bucket on S3. The reference and comparison bundles are read
-# anonymously from gs://climatebench; results are written there with the GCS
-# HMAC key in the `cb2-gcs-hmac` Secret (see score-job.yaml). Replace the
-# placeholders before applying:
-#   <ACCOUNT_ID>, <ROLE_NAME>
+# Submissions are read from the private bucket gs://climatebench-submissions
+# and results written to gs://climatebench/v2/results/, both with the GCS HMAC
+# key in the `cb2-gcs-hmac` Secret (see score-job.yaml); the reference and
+# comparison bundles are read anonymously from public gs://climatebench. None
+# of that needs AWS credentials.
+#
+# The IAM role (IRSA) annotation below is OPTIONAL: it is needed only to read
+# submissions from an s3:// bucket. Either replace <ACCOUNT_ID> and
+# <ROLE_NAME> with a role that may read that bucket, or delete the
+# `annotations:` block.
 #
 #   kubectl apply -f deploy/k8s/base.yaml
 apiVersion: v1
@@ -18,5 +22,5 @@ kind: ServiceAccount
 metadata:
   name: cb2-scorer
   namespace: climatebench
-  annotations:
+  annotations:  # optional: only for s3:// submissions (see above)
     eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>
