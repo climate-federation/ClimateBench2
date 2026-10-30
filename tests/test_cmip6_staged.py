@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import pytest
 
+from climatebench2._thresholds import get_threshold
 from climatebench2.data import (
     STAGED_ROOT_ENV,
     StagedCMIP6HistoricalSSP245,
     staged_root,
 )
-from climatebench2.data.cmip6_staged import clear_discovery_cache
+from climatebench2.data.cmip6_staged import clear_discovery_cache, select_members
 
 pytest.importorskip("climateeval")
 
@@ -280,3 +281,95 @@ def test_the_ceres_reference_derives_the_cre_from_its_staged_fluxes(tmp_path) ->
             download_missing_data=False,
         )
         assert float(np.asarray(cube.data).mean()) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# The member policy: r*i1p1f*, first 10 by realization number, per model
+# ---------------------------------------------------------------------------
+
+
+def test_the_member_policy_lives_in_thresholds() -> None:
+    """Paper Fig. 4 caption: "its r*i1p1f* members, capped at the first 10"."""
+    assert get_threshold("tier2.comparison_ensemble.member_pattern") == "r*i1p1f*"
+    assert get_threshold("tier2.comparison_ensemble.max_members_per_model") == 10
+
+
+def test_select_members_orders_by_realization_number_not_by_name() -> None:
+    """``r2`` precedes ``r10``; a string sort would put ``r10`` second."""
+    members = ["r10i1p1f1", "r2i1p1f1", "r1i1p1f1", "r3i1p1f1"]
+    assert select_members(members) == ["r1i1p1f1", "r2i1p1f1", "r3i1p1f1", "r10i1p1f1"]
+
+
+def test_select_members_takes_any_forcing_index_but_only_i1p1() -> None:
+    members = [
+        "r1i1p1f2",  # UKESM1-0-LL / CNRM-*: f2 is in the ensemble
+        "r2i1p1f3",
+        "r1i2p1f1",  # another initialisation method: out
+        "r1i1p2f1",  # another physics version (CanESM5 p2): out
+        "r3i1p1f1",
+        "not-a-variant",
+    ]
+    assert select_members(members) == ["r1i1p1f2", "r2i1p1f3", "r3i1p1f1"]
+
+
+def test_select_members_caps_at_ten_after_ordering() -> None:
+    """The cap keeps the FIRST ten realizations, not ten arbitrary ones."""
+    members = [f"r{r}i1p1f1" for r in range(25, 0, -1)] + [
+        f"r{r}i1p2f1" for r in range(1, 26)
+    ]
+    assert select_members(members) == [f"r{r}i1p1f1" for r in range(1, 11)]
+
+
+def test_select_members_mirrors_the_staging_script_on_ties() -> None:
+    """Same realization, two forcing indices: two members, ordered by name."""
+    assert select_members(["r1i1p1f2", "r1i1p1f1", "r2i1p1f1"], cap=2) == [
+        "r1i1p1f1",
+        "r1i1p1f2",
+    ]
+
+
+def test_select_members_takes_an_explicit_pattern() -> None:
+    members = ["r1i1p1f1", "r1i1p1f2", "r2i1p1f1"]
+    assert select_members(members, pattern="r*i1p1f1") == ["r1i1p1f1", "r2i1p1f1"]
+    with pytest.raises(ValueError, match="member pattern"):
+        select_members(members, pattern="r?i1p1f1")
+
+
+def _stage(root, source_id: str, var_names: list[str]) -> None:  # noqa: ANN001
+    for var_name in var_names:
+        var_dir = root / source_id / "mon" / var_name
+        var_dir.mkdir(parents=True)
+        (var_dir / f"{var_name}.nc").touch()
+
+
+def test_the_generator_applies_the_policy_before_variable_availability(
+    tmp_path,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """A model's first ten members are fixed; a variable may have fewer.
+
+    Twelve qualifying members of one model are staged, plus an ``i2`` and a
+    ``p2`` member. ``tas`` is on all of them; ``siconc`` is missing from
+    ``r3`` and present on ``r11`` and ``r12``. The ensemble is r1..r10 for
+    both variables, so ``siconc`` gets nine members — not r11 in r3's place,
+    which a per-variable cap would give (the staging script that built the
+    Levante root behaves the same way).
+    """
+    model = "CanESM5"
+    for r in range(1, 13):
+        variables = ["tas"] if r == 3 else ["tas", "siconc"]
+        _stage(tmp_path, f"CMIP6_{model}_historical-ssp245_r{r}i1p1f1", variables)
+    _stage(tmp_path, f"CMIP6_{model}_historical-ssp245_r1i2p1f1", ["tas", "siconc"])
+    _stage(tmp_path, f"CMIP6_{model}_historical-ssp245_r1i1p2f1", ["tas", "siconc"])
+    monkeypatch.setenv(STAGED_ROOT_ENV, str(tmp_path))
+    clear_discovery_cache()
+    try:
+        def members(var_name: str) -> set[str]:
+            sources = StagedCMIP6HistoricalSSP245().generate(_variable(var_name))
+            return {s.information.variant for s in sources}
+
+        first_ten = {f"r{r}i1p1f1" for r in range(1, 11)}
+        assert members("tas") == first_ten
+        assert members("siconc") == first_ten - {"r3i1p1f1"}
+    finally:
+        clear_discovery_cache()

@@ -1,5 +1,5 @@
 # ClimateBench v2 — Tier II: scoring against observations.
-# Core protocol variables (metrics_reference.md Tier II): tas, ts, pr, TOA
+# Core protocol variables (metrics_reference.md Tier II): tas, pr, TOA
 # fluxes, SST, sea ice, OHC, prw, clouds — evaluated with ClimateEval diagnostics
 # against the protocol's observational references, with the CMIP6
 # historical+SSP2-4.5 ensemble carried along as comparison (the MME baseline of
@@ -46,8 +46,13 @@
 # the trends from `annual_mean_timeseries` and combines the ensemble spread
 # with the piControl sigma_int (Tier I suite) and sigma_obs.
 #
-# The paper's figure set is tas, ts, pr, rsut, rlut, rsutcs, rlutcs, swcre,
-# lwcre, tos, siconc, clt, clwvi, clivi (Duncan, 2026-09-24). The clouds were
+# Skin temperature `ts` is NOT scored (Duncan, 2026-10-27, v2 protocol): its only
+# staged reference was MERRA-2, a reanalysis stand-in ending 2021, and it was
+# already left out of the published Fig. 4. Model `ts` remains a Tier I input.
+#
+# The 2026-09-24 figure set (Duncan) was tas, ts, pr, rsut, rlut, rsutcs,
+# rlutcs, swcre, lwcre, tos, siconc, clt, clwvi, clivi; ts is gone since
+# 2026-10-27, as above. The clouds were
 # OUT of it until then: their only reference was ESACCI-CLOUD, which ends in
 # 2016, so their scored window was two years of the test window and the fair
 # CRPS fell below the scoring pass's minimum overlap. They are now referenced
@@ -73,18 +78,6 @@
         # climatebench2/data/cmip6_staged.py for why this and not upstream's
         # pool-globbing climateeval.data.CMIP6HistoricalSSP245 (identical ids).
         - climatebench2.data.StagedCMIP6HistoricalSSP245
-    # Surface (skin) temperature, the second of the paper's two temperature
-    # variables. Reference: MERRA2, not ERA5 -- ClimateEval's ERA5 source can
-    # serve `ts` (upstream PR #48) but only by downloading it from the CDS,
-    # and the staged ERA5 has no `ts`, whereas MERRA2 `ts` is staged monthly
-    # for 1980-01..2021-12. That end date is what bounds the scored window:
-    # `ts` is scored over 2015-2021, not the full test window
-    # (climatebench2.reference_windows resolves and reports it).
-    - id: ts
-      var_name: ts
-      frequency: mon
-      reference_data: climateeval.data.MERRA2
-      other_data: *comparison_ensemble
     - id: pr
       var_name: pr
       frequency: mon

@@ -130,10 +130,10 @@ locally (**#44 before #45**, both adding generators to the same module; **#49 be
 | **#45** | hist-aer / amip / amip-4xCO2 / lgm / midHolocene / lig127k generators | **Merged, no data staged.** No PMIP4 or DAMIP pool is staged, so Tier III still writes `NO_REFERENCE_ENSEMBLE` and I.4a/b and I.7 still need submission-supplied `--experiment` directories |
 | **#46** | `Nino34` accepting `window_length = 1` | **Merged and taken up** (`224a133`): `ENSOGate._preprocess` — a copy of the whole Niño-3.4 chain that existed only to skip the running mean — is deleted, and setting `_rolling_window_length = 1` is the entire override |
 | **#47** | `SeaIceExtent*` diagnostics (Σ A where siconc > 15 %) | **Merged and taken up** (`b9f4952`): the sea-ice stanzas use `SeaIceExtentAnnualCycle` / `SeaIceExtentTimeSeries`. Note there is **no `extent_threshold` diagnostic kwarg** — 15 % is the class default `_concentration_threshold` (`SEA_ICE_EXTENT_THRESHOLD`), and a suite passing `extent_threshold:` would raise |
-| **#48** | ERA5 `zg` / `ts` | **Merged, not staged.** The staged ERA5 has neither, and fetching them means a CDS download, so I.3c's reference column still uses `physics.hydrostatic_height`, I.5c's temperature pattern is still HadISST `tos` alone (pairwise land masking), and Tier II `ts` is referenced against **MERRA2** (`9192aaf`) |
+| **#48** | ERA5 `zg` / `ts` | **Merged, not staged.** The staged ERA5 has neither, and fetching them means a CDS download, so I.3c's reference column uses `physics.hydrostatic_height` — since 2026-10-27 deliberately, on the model side too, so staging ERA5 `zg` would not change I.3c — I.5c's temperature pattern is still HadISST `tos` alone (pairwise land masking), and Tier II `ts` was referenced against **MERRA2** (`9192aaf`) until Duncan dropped `ts` from the v2 protocol (2026-10-27) |
 | **#49** | GISTEMP / BerkeleyEarth / NOAAGlobalTemp / CRU sources (+ the `tasa` variable) | **Merged, not staged.** `tas` is still scored against HadCRUT5 alone, so there is still no measured inter-product σ_obs, and `LandAnnualTemperatureRange` still uses ERA5 rather than CRU TS |
 | **#50** | Tier I energy budget / covariance — `EnergyBalance`, `BudgetClosure`, `ClearSkyLongwaveFeedback`, `PrecipitationBuoyancy`, `ClausiusClapeyronScaling` | **Merged; CB2's copies not yet retired.** The deletion is a pin bump away, and the pin cannot move until the PR lands upstream — so `diags/tier1_physics.py` and `diags/tier1_extended.py` still carry the physics (gap item 8) |
-| **#51** | dynamics / variability — `GeostrophicBalance`, `MJOEastWestPowerRatio`, `ITCZEnergyFluxEquator`, `BjerknesCompensation`, `ENSOTeleconnectionPatterns` | Same as #50. ⚠ The four "Real-data fix" commits of 2026-09-20 changed CB2's copies of I.3b and I.3c (date pairing, masked fill values, the matched level set); those fixes must be carried into #51 before it merges upstream, or retiring the CB2 copy would regress them |
+| **#51** | dynamics / variability — `GeostrophicBalance`, `MJOEastWestPowerRatio`, `ITCZEnergyFluxEquator`, `BjerknesCompensation`, `ENSOTeleconnectionPatterns` | Same as #50. ⚠ The four "Real-data fix" commits of 2026-09-20 changed CB2's copies of I.3b and I.3c (date pairing, masked fill values, the matched level set); those fixes must be carried into #51 before it merges upstream, or retiring the CB2 copy would regress them. ⚠ 2026-10-27: upstream `PrecipitationBuoyancy` (ClimateEval main `d2559b2`, `_consistency.py`) still has the I.3c **level-order bug** (`np.asarray(levels)` against top-down data), reads the model's `zg` and regresses the model's full record — the three I.3c fixes of 2026-10-27 must go upstream before CB2 could use it |
 | **#52** | forcing — `Amip4xCO2ERF`, `GFMIPPatchFeedback`, `AerosolERF` + a branch-time helper | Same as #50; and see decision D.3 — adopting the helper in `ECS` would move ClimateEval's published ECS numbers |
 | **#53** | HadEX3 + `ESACCISeaIceNH/SH` (depends on #49) | **Merged, not staged.** The four *temperature* ETCCDI extremes are still computed and **unscored**: those variables of the `extremes` entry still carry no `reference_data:`. The four *precipitation* indices no longer wait on this — they are scored against `climatebench2.data.IMERG` (2026-09-21), a CB2-side DataSource that itself belongs upstream |
 | **#54** | `ERA5Daily` | **Merged, not staged.** Perkins and the diurnal harmonic still depend on `ERA5Hourly`'s single staged year |
@@ -271,8 +271,9 @@ survives.
   — **extended 2026-09-24** (Duncan) to `tas, ts, pr, rsut, rlut, rsutcs, rlutcs,
   swcre, lwcre, tos, siconc, clt, clwvi, clivi`: the clouds against MODIS, the
   cloud-radiative effects against CERES-EBAF (B.26, B.31).
-- `ts` is referenced against **MERRA-2** as a staged stand-in; ERA5 `ts` exists upstream
-  (#48) but needs a CDS download.
+- ~~`ts` is referenced against **MERRA-2** as a staged stand-in; ERA5 `ts` exists upstream
+  (#48) but needs a CDS download.~~ **Superseded 2026-10-27 (Duncan):** `ts` is no longer a
+  Tier II scored variable in the v2 protocol (B.26); model `ts` stays a Tier I input.
 
 A new group **E** records the protocol questions the first real runs raised. Those are
 **not** decisions already taken in code — they are observations that the code is doing
@@ -383,10 +384,20 @@ implemented and unit-tested; none is claimed to be the paper's own words.
     physics/initialisation pair `i1p1`, **any** forcing index (so UKESM1-0-LL, the
     CNRM-\* and the HadGEM3-\* families, which publish `f2`/`f3`, are not silently
     dropped as they are under upstream's `r*i1p1f1` facet), capped at the **first ten
-    realizations** per model by realization number. The staged root is built to that
-    policy and `StagedCMIP6HistoricalSSP245` simply enumerates what is there, so the
-    policy lives in the staging step and its manifest, not in a CB2 constant.
-    → §II.0, `climatebench2/data/cmip6_staged.py`.
+    realizations** per model by realization number. **In the package since
+    2026-10-27:** the policy used to live only in the out-of-repo staging script that
+    built the Levante root (`build_comparison_root.py`), so any other root (a cloud
+    bucket, a mirror holding every member) would have given a different `E_ref`. It is
+    now `data.cmip6_staged.select_members`, a pure function applied by
+    `StagedCMIP6HistoricalSSP245` to every root, with the pattern and the cap in
+    `tier2.comparison_ensemble.{member_pattern, max_members_per_model}`
+    (`"r*i1p1f*"`, 10). Its semantics are the staging script's exactly: realization
+    number ascending (numerically: `r2` before `r10`), ties ordered by name, and the
+    cap applied **per model before any variable is looked at**, so a model's ten
+    members are fixed and a variable some of them lack is scored on fewer. On the
+    Levante root (every model already ≤ 10 `i1p1` members) it is a no-op, so the
+    paper's databases and the frozen comparison bundle built from them are unchanged.
+    → §II.0, `climatebench2/data/cmip6_staged.py`, decision E.6.
 25. **Sea ice is extent, referenced against HadISST.** **RATIFIED 2026-09-20:** the
     protocol scores **extent** (Σ A where siconc ≥ 15 %), not area (Σ siconc·A) — a
     systematically larger number and far less sensitive to a concentration bias — and
@@ -406,6 +417,11 @@ implemented and unit-tested; none is claimed to be the paper's own words.
     covers the whole test window) and the figure set gains them plus the CERES-EBAF
     cloud-radiative effects `swcre`/`lwcre` — fourteen variables: `tas, ts, pr, rsut,
     rlut, rsutcs, rlutcs, swcre, lwcre, tos, siconc, clt, clwvi, clivi`. See B.31.
+    **Changed 2026-10-27 (Duncan):** MERRA-2 `ts` is dropped from the v2 protocol, so
+    `ts` is **not scored** in Tier II at all (it was already left out of the published
+    Fig. 4); its suite stanza, its `obs_sigma` entry and its place in
+    `tier2.pattern_scaling.variables` are gone. Model `ts` remains an input to Tier I
+    (I.3a, I.5c, I.4a) and Tier III.
     → Tier II status table, `9192aaf`.
 27. **The regime-(a) anomaly baseline is per `data_id`, i.e. per ensemble member**
     (2026-09-21). The paper says "anomaly series" without saying *whose* climatology.
@@ -535,7 +551,10 @@ implemented and unit-tested; none is claimed to be the paper's own words.
    anchors and the consequences. Needs the digitised AR6 Ch. 7 / Annex III series.
    → §II.0 baselines.
 2. ~~**`tier1.precip_buoyancy.reference_slope: null`** — pin it.~~ **WON'T FIX, and the
-   null is now deliberate (2026-09-20, `52d2e50`).** The reference column must be
+   null is now deliberate (2026-09-20, `52d2e50`).** ⚠ **Reopened 2026-10-27:** the
+   level-set dependence below was a level-ordering bug in the column integral; with it
+   fixed the staged ERA5 gives 0.1162 on 37 levels and 0.1166 on `plev19`, so a stored
+   constant is defensible again — see E.4. The original reasoning: The reference column must be
    integrated over the **submission's own level set**, because the observed slope is a
    strong function of the discretisation: measured on the staged ERA5 over 20S–20N,
    1983–2014, the slope is 0.146 mm day⁻¹ per MJ m⁻² (r = 0.42) on ERA5's 37 levels and
@@ -574,7 +593,7 @@ implemented and unit-tested; none is claimed to be the paper's own words.
    level set, were fixed in CB2's copies *after* the PRs were opened. Retiring the CB2
    copies against the PRs as they stand would regress all four.
 
-### E. Protocol observations from the first real runs (2026-09-20) — Duncan to rule (5)
+### E. Protocol observations from the first real runs (2026-09-20) — Duncan to rule (6)
 
 **These are not code changes and none has been made.** In each case the code implements
 the paper's own definition and the paper's own bound, and the first real model says the
@@ -613,15 +632,17 @@ bound is unreachable or the definition is ambiguous. They are recorded here rath
    AMET peak sits at **39.9°N** — just outside. Either the bound is a genuine 5°
    tolerance and models will fail it on discretisation, or the peak latitude should be
    estimated sub-gridscale (parabolic fit about the maximum). → I.8a.
-4. **I.3c's ±30 % is demanding, and the two regression windows differ.** Even with the
-   level sets matched and the dates paired, the precipitation–buoyancy regression is
-   noisy: r ≈ 0.1 on the reference column over the tropics. A ±30 % window on a slope
-   estimated at that correlation is a tight bound on a weak statistic. Compounding it,
-   the model slope is computed over the model's **1850–2014** historical record while
-   the observed slope is computed over the reference's **1983–2014** (GPCP's start,
-   after `reference_windows` clipping) — different decades, different ENSO composition.
-   Should the model be cut to the observational window before the comparison, and should
-   the bound be relaxed or the statistic changed? → I.3c.
+4. **I.3c's ±30 % is demanding, and the two regression windows differ.** *(Resolved
+   2026-10-27, text rewritten.)* The window half is settled (Duncan): the model is cut to
+   the paper's 1983–2014 and to the reference's months, and both sides use a hydrostatic
+   geopotential. The "weak statistic" half was a **code bug**: the column integral paired
+   the top-down levels of CMIP6/ERA5 files with an ascending pressure list. With it fixed
+   the pooled correlation is ≈ 0.5, not ≈ 0.1, and CNRM-CM6-1 reads 0.017 against 0.30
+   (model 0.1147, reference 0.1166). **Still for Duncan:** (a) whether ±30 % is still the
+   right width now that the statistic is well determined, which the Tier I re-run over
+   the CMIP6 ensemble will show; (b) whether to pin `tier1.precip_buoyancy.
+   reference_slope`, since the observed slope no longer depends on the level set
+   (≈ 0.116 mm day⁻¹ per MJ m⁻² on `plev19` and on ERA5's 37 levels). → I.3c.
 5. **I.8b's ITCZ latitude is quantised to the 2° grid; a centroid definition tightens it
    further but is not decisive.** With the `itcz_lag_months` fix in place, the argmax
    ITCZ latitude already clears both I.8b bounds on CNRM-CM6-1 and MPI-ESM1-2-LR. A
@@ -631,6 +652,20 @@ bound is unreachable or the definition is ambiguous. They are recorded here rath
    "latitude of the zonal-mean precipitation maximum" the literal argmax, or does it
    intend the smoother centroid definition the cited literature actually uses? Left as
    argmax (unchanged) pending a ruling; the centroid is not implemented. → I.8b.
+6. **The member cap is per model, not per variable (2026-10-27).** The ratified policy
+   (decision B.24) takes a model's first ten `r*i1p1f*` realizations **once**, and
+   scores a variable on whichever of those ten carry it; the alternative is to take,
+   per variable, the first ten that *have* the variable. The package implements the
+   former, which is what built the paper's ensemble (`select_members`). Measured on
+   the Levante staging (directory listings only; the Tier II farm the root was capped
+   from, plus the CMIP6 inventory for `clt`/`clwvi`/`clivi` and daily `pr`): of 630
+   (model, variable) cells, **3 would change, each by one added member, none crossing
+   the two-member line** that decides whether a fair CRPS exists — EC-Earth3 `siconc`
+   and daily `pr` (9 → 10, + `r14i1p1f1`) and IPSL-CM6A-LR daily `pr` (9 → 10,
+   + `r25i1p1f1`). On the staged root itself nothing changes (it holds only the capped
+   members). Keep the per-model cap, or switch? Switching would need the root
+   restaged and the frozen comparison bundle rebuilt. → §II.0,
+   `climatebench2/data/cmip6_staged.py`.
 
 ---
 
@@ -647,7 +682,7 @@ Every check is binary pass/fail. A model must pass Tier I to be scored in Tier I
 | I.2b | Atmospheric energy budget | \|⟨Q_rad⟩ − (⟨L·P⟩+⟨SHF⟩)\| < 2 W/m² | Req. | ✅ the paper's arrangement, `Q_rad = sfc_net_rad − TOA_net`; an Earth-like column (LP ≈ 80, SHF ≈ 20, Q_rad ≈ 100 W/m²) now closes to ≈ 0 | `ClosureGate`, `physics.atmospheric_energy_residual` |
 | I.3a | Clear-sky LW feedback β = ∂rlutcs/∂Ts | global-mean **forced** slope (abrupt-4xCO2 vs piControl) within ±25% of 1.9 W/m²/K — **RATIFIED 2026-09-21** | Req. | ✅ OLS slope of annual global-mean `rlutcs` on `ts` anomalies (baseline = piControl long-term mean, `physics.gregory_regression`), ±25% of 1.9. Closes decision E.1: on CNRM-CM6-1 the forced-response slope was already measured at **1.75**, inside the new window (the superseded interannual `historical` gridpoint statistic gave 0.71, outside the old [1.65, 2.75]) | `ClearSkyFeedbackGate`, `physics.gregory_regression` |
 | I.3b | Midlatitude geostrophic balance | spatial ρ(u, u_g) at 850 hPa daily, 30–60°, > 0.9. **Skipped (N/A) for models with no dynamical representation** | Req. (N/A allowed) | ✅ per spec (daily `ua`/`zg` at 850 hPa, optional `ps` orography mask, pooled 30–60° both hemispheres); N/A **declarable** (`score --not-applicable geostrophic_balance` → `applicable = 0`). **Run on real data (CNRM-CM6-1): ρ = 0.985** (NH 0.976, SH 0.990), after two fixes the synthetic fixtures could not have caught — `ua`/`zg`/`ps` are paired on **calendar days** rather than by position (`3c5c47c`) and the masked 850 hPa field is read with `_filled` rather than `np.asarray` (`74e0f7c`; without it the file's 1e20 under sub-surface points gave ρ = 0.088) | `diags.tier1_extended.GeostrophicBalanceGate`, `align_on_common_days` |
-| I.3c | Tropical precipitation–buoyancy | monthly P′ vs column-MSE′ slope, 20S–20N, ±30% of GPCP/ERA5 | Req. | ✅ ∫(c_p·ta + g·zg + L_v·hus) dp/g, monthly anomalies over 20S–20N, pooled slope, gated at ±30% of the run-time GPCP/ERA5 slope. Two real-data fixes: the model and reference fields are paired on **calendar months** (`77a9301` — GPCP starts 1983 and ERA5 1979, and the old positional cut regressed GPCP 1983–2014 on ERA5 1979–2010, giving an unphysical *negative* reference slope), and the reference column is integrated over the **model's own level set** (`52d2e50`), emitted as **`precip_buoyancy_n_levels`**. The stored `reference_slope` stays **null by design** (decision C.2). ⚠ The gate still reads \|model/ref − 1\| ≈ 0.84 against 0.30 on CNRM-CM6-1 — decision E.4 | `diags.tier1_extended.PrecipBuoyancyGate`, `align_on_common_months`, `physics.moist_static_energy` / `mass_weighted_column_integral` / `pooled_regression_slope` |
+| I.3c | Tropical precipitation–buoyancy | monthly P′ vs column-MSE′ slope, 20S–20N, ±30% of GPCP/ERA5 | Req. | ✅ ∫(c_p·ta + g·z + L_v·hus) dp/g with z hydrostatic from each side's own ta/hus (model `zg` not read), over **1983–2014 on the identical month set** for model and reference, monthly anomalies over 20S–20N, pooled slope, gated at ±30% of the run-time GPCP/ERA5 slope. Earlier real-data fixes: the model and reference fields are paired on **calendar months** (`77a9301` — GPCP starts 1983 and ERA5 1979, and the old positional cut regressed GPCP 1983–2014 on ERA5 1979–2010, giving an unphysical *negative* reference slope), and the reference column is integrated over the **model's own level set** (`52d2e50`), emitted as **`precip_buoyancy_n_levels`**. The stored `reference_slope` stays null (decision C.2, reopened in E.4). 2026-10-27: a level-ordering bug in the column integral fixed; CNRM-CM6-1 now reads \|model/ref − 1\| = 0.017 (pass; 0.319 at v1.0.0) | `diags.tier1_extended.PrecipBuoyancyGate`, `align_on_common_months`, `physics.moist_static_energy` / `mass_weighted_column_integral` / `pooled_regression_slope` |
 | I.4a | GFMIP SST patch experiments | Δλ = ΔR_EP/ΔTs_EP − ΔR_WP/ΔTs_WP > 0.5 W/m²/K — **Extended** | Ext. | ✅ per spec; needs submission-provided `amip`/`patch_ep`/`patch_wp`; tagged `requirement: extended`, so it is reported for credit but outside the entry ticket | `GFMIPPatchGate` |
 | I.4b | amip-4xCO2 ERF | 6.5–9.0 W/m² | Req. | ✅ (TOA-net difference amip-4xCO2 − amip; no land-warming correction, none asked) | `Amip4xCO2ERFGate` |
 | I.5a | ENSO amplitude | σ(Niño-3.4) ∈ [0.5, 1.4] K | Req. | ✅ σ of the **unsmoothed** deseasonalised monthly index (`ENSOGate._rolling_window_length = 1`), computed on the **piControl experiment in full** (confirmed 2026-09-14: `_cli.SUITE_REGISTRY` gives `ClimateBench2_TierI_variability` `source="picontrol"`, `window="full"`; the CLI warns loudly and falls back to the submission's own output if none is given). The CB2 `_preprocess` copy of the whole Niño-3.4 chain is **gone** (`224a133`, PR #46 merged): setting `_rolling_window_length = 1` is now the entire override | `diags.pass_fail.ENSOGate` |
@@ -700,8 +735,9 @@ a statement about one model. Numbers in "What has run on real data", below.
 checks that compare against *data* rather than a constant, and they take that data the
 way the rest of CB2 does — a ClimateEval DataSource, a `Variable` carrying a
 `timerange`, `download_missing_data` from the CLI. Their windows
-(`tier1.precip_buoyancy.obs_window`, `tier1.enso.teleconnection_obs_window`, both
-1979–2014) start where GPCP does and stop before the reserved post-2015 test period, so
+(`tier1.precip_buoyancy.obs_window` = 1983–2014, the paper's I.3c window, which the
+model is cut to as well; `tier1.enso.teleconnection_obs_window` = 1979–2014, clipped
+per product to the staged record) stop before the reserved post-2015 test period, so
 Tier I never sees the Tier II target. Both degrade identically when the products cannot
 be fetched and `fail_on_missing_data` is False (the CLI default): the model's own
 statistic is written to `raw_output`, the reason is logged, and **no gate row** is
@@ -964,23 +1000,43 @@ passes = rho > 0.9
 instability (moist static energy / buoyancy), per Neelin-type precipitation–buoyancy
 relations.
 
-**Spec.** Monthly anomalies, 20S–20N, historical. Regress precipitation anomalies P′ on
-column-integrated MSE anomalies ⟨h⟩′ (MSE h = c_p·T + g·z + L_v·q, mass-weighted vertical
-integral; requires `ta`, `zg`/`hus` profiles or a column proxy). Compare the slope to the
-same regression computed from GPCP precipitation and ERA5 column MSE.
+**Spec.** Monthly anomalies, 20S–20N, historical, **over 1983–2014, the period of the
+GPCP/ERA5 reference** (paper Table 1 and App. B.3) — the model is regressed over the same
+window as the observations, not over its whole historical record. Regress precipitation
+anomalies P′ on column-integrated MSE anomalies ⟨h⟩′ (MSE h = c_p·T + g·z + L_v·q,
+mass-weighted vertical integral; requires `ta` and `hus` profiles). Compare the slope to
+the same regression computed from GPCP precipitation and ERA5 column MSE; because the
+slope depends on the pressure levels the MSE is integrated over, the reference is
+computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
 **Pass: model slope within ±30% of the observed slope.**
 
 **Status: ✅ (2026-09-14, gap item 5)** —
 `diags/tier1_extended.py::PrecipBuoyancyGate` (`historical` key,
 `requirement: required`, suite entry `precip_buoyancy`).
-- ✅ **Column MSE.** `ta`, `zg` and `hus` (all three in ClimateEval's registry with an
-  `alevel` coordinate) are regridded to 2°, cut to 20S–20N, put on their *common*
-  pressure levels with `esmvalcore.preprocessor.extract_levels`, combined into
-  `h = c_p·ta + g·zg + L_v·hus` (`physics.moist_static_energy`; `c_p`, `R_d` and the
-  virtual-temperature factor join `L_v` and `g` as module constants) and integrated
-  with `physics.mass_weighted_column_integral` (`np.trapezoid` over `plev`, ÷ g). The
-  integral spans only the levels the monthly Amon data carry (`plev19`), so it is a
-  *partial* column — which is why the reference must be truncated the same way.
+- ✅ **One window, one month set** (2026-10-27). Every model field is cut to
+  `tier1.precip_buoyancy.obs_window` = **[1983, 2014]** (`restrict_to_years`, by calendar
+  date, *before* regridding) — the CLI hands Tier I the first member's **full**
+  historical record, sometimes spliced to 2100, and the gate used to regress all of it
+  against a 1983–2014 reference. When the reference is computed, the model's `pr`/`ta`/
+  `hus` and GPCP `pr` / ERA5 `ta`/`hus` are then cut together to the calendar months
+  **all six** carry (`align_on_common_months`), so the two regressions use the
+  identical month set — a reference that ends early, or a model gap, shortens both
+  sides alike. With the stored-`reference_slope` fallback the model still uses the
+  protocol window. `precip_buoyancy_n_months`, `_first_year` and `_last_year` record
+  the months actually regressed. 1983 is where GPCP v3.3 as staged begins; the key read
+  [1979, 2014] until 2026-10-27 and bounded only the reference.
+- ✅ **Column MSE.** `ta` and `hus` (both in ClimateEval's registry with an `alevel`
+  coordinate) are cut to the window, regridded to 2°, cut to 20S–20N, put on their
+  *common* pressure levels with `esmvalcore.preprocessor.extract_levels`, and given a
+  **hydrostatic geopotential built on those levels from their own `ta`/`hus`**
+  (`physics.hydrostatic_height`, the hypsometric equation upward from the lowest common
+  level), then combined into `h = c_p·ta + g·z + L_v·hus` (`physics.moist_static_energy`;
+  `c_p`, `R_d` and the virtual-temperature factor join `L_v` and `g` as module
+  constants) and integrated with `physics.mass_weighted_column_integral`
+  (`np.trapezoid` over `plev`, ÷ g). The integral spans only the levels the monthly
+  Amon data carry (`plev19`), so it is a *partial* column — which is why the reference
+  must be truncated the same way. The model's own `zg` is **not read** (decision
+  2026-10-27, below), so a submission need not supply it.
 - ✅ **The statistic.** Monthly anomalies of ⟨h⟩ (`physics.deseasonalised_anomalies`,
   the numpy counterpart of `anomalies(period="month")` for a field CB2 derives itself
   and never holds as a cube) and of `pr` (the ESMValCore preprocessor, on the cube),
@@ -989,14 +1045,14 @@ same regression computed from GPCP precipitation and ERA5 column MSE.
   scaling cancels. No cos-weighting inside the pool — over 20S–20N the weight varies
   between 0.94 and 1.
 - ✅ **Model and reference are paired by calendar month** (`77a9301`).
-  `reference_windows.clip_to_source` clips the 1979–2014 obs window per product, so on
-  the staged root `pr` arrives as GPCP 1983–2014 (384 months) and `ta`/`hus` as ERA5
-  1979–2014 (432). Cutting both to the shorter *length from the start* regressed GPCP
+  `reference_windows.clip_to_source` clipped the then 1979–2014 obs window per product,
+  so on the staged root `pr` arrived as GPCP 1983–2014 (384 months) and `ta`/`hus` as
+  ERA5 1979–2014 (432). Cutting both to the shorter *length from the start* regressed GPCP
   1983–2014 on ERA5 1979–2010 — a four-year offset that produced a reference slope of
   **−0.0046** mm day⁻¹ per MJ m⁻², i.e. an unphysical *negative* precipitation–buoyancy
   relation, and a gate reading |model/ref − 1| = 6.01 against 0.30.
   `align_on_common_months` (the monthly counterpart of `align_on_common_days`; both
-  share `_align_on_common_times`) now pairs `pr`/`ta`/`zg`/`hus` before the anomalies
+  share `_align_on_common_times`) now pairs `pr`/`ta`/`hus` (and, until 2026-10-27, `zg`) before the anomalies
   are formed. The model side was never affected — its four inputs come from one
   experiment and already agree month for month.
 - ✅ **The reference column is integrated over the MODEL's levels** (`52d2e50`).
@@ -1011,43 +1067,121 @@ same regression computed from GPCP precipitation and ERA5 column MSE.
   | ERA5's own 37 levels | 0.14637 | 0.42 |
   | CMIP6 `plev19` | 0.03403 | 0.11 |
 
-  against a CNRM-CM6-1 model slope of 0.02316 (1850–2014), 0.02822 (1983–2014) or
-  0.03569 (1983–2014 with the same hydrostatic `zg` the reference has to use). The
-  coarse lower-troposphere sampling inflates var(⟨h⟩′) and halves the correlation:
-  comparing the two level sets compares discretisations, not atmospheres.
-  `_calculate_raw_output` now derives the level set once from the submission's own
-  `ta`/`zg`/`hus` (`_common_levels`, the intersection of their `air_pressure` points,
-  ≥ 2 required) and passes it to both slopes, and **`precip_buoyancy_n_levels`** is
-  emitted so a scorecard row can be read without guessing the discretisation.
-- ✅ **The stored `reference_slope` stays null, deliberately.** A stored constant can
-  only ever be correct for one level set, so it cannot be pinned model-independently
-  (decision C.2); the run-time reference is the right path. With neither a run-time nor
-  a stored reference the model slope is emitted and **no gate row** is written.
-- ⚠ **Upstream gap.** ERA5 `zg` exists upstream (PR #48, merged) but is **not staged**,
-  so the reference column still falls back to a hydrostatic geopotential integrated from
-  ERA5 `ta`/`hus` (`physics.hydrostatic_height`). This is defensible for *anomalies* —
-  the missing surface term is constant in time — and the fallback is logged; staging
-  ERA5 `zg` would remove the approximation.
+  The paper integrates the reference over the submission's own levels (App. B.3), and
+  both columns are integrated over **the levels both sides actually carry**
+  (next-but-one bullet), emitted as **`precip_buoyancy_n_levels`**.
+  ⚠ **The table above is a bug, not discretisation** (found 2026-10-27; next bullet).
+- ✅ **Each level is weighted by its own pressure** (2026-10-27, a code bug fixed).
+  `_column_mse` handed `mass_weighted_column_integral` the *ascending* sorted level
+  list as the pressure of each level, but `extract_levels` keeps a file's own order
+  when the requested levels are a subset of its own (ESMValCore's extract shortcut),
+  and CMIP6 and ERA5 files run top-down from 1000 hPa — so the 1000 hPa field was
+  integrated as if it sat at the top of the column, on both sides. The integral now
+  takes the cube's own pressure points. Measured on CNRM-CM6-1 and the staged
+  GPCP/ERA5 over 20S–20N (2° grid; mm day⁻¹ per MJ m⁻², r in brackets):
+
+  | | level-order bug (v1.0.0) | fixed |
+  |---|---|---|
+  | reference, ERA5 on its own 37 levels | 0.14637 (0.42) | 0.11621 (0.49) |
+  | reference, ERA5 on CMIP6 `plev19` (z from 37 levels, interpolated) | 0.03402 (0.11) | 0.11659 (0.48) |
+  | reference, ERA5 on `plev19` (z hydrostatic on `plev19`) | 0.03403 (0.11) | 0.11664 (0.48) |
+  | model 1850–2014, own `zg` (v1.0.0) | 0.02316 (0.08) | 0.11584 (0.50) |
+  | model 1850–2014, hydrostatic z | 0.02992 (0.11) | 0.11466 (0.51) |
+  | model 1983–2014, own `zg` | 0.02822 (0.10) | 0.11636 (0.51) |
+  | model 1983–2014, hydrostatic z (now) | 0.03569 (0.12) | 0.11469 (0.52) |
+
+  With the order fixed the reference no longer depends on the level set (0.1162 vs
+  0.1166), the correlation is ≈ 0.5 rather than ≈ 0.1, and the window and the
+  hydrostatic z each move the model slope by about 1 %. A synthetic regression test
+  with a bottom-heavy anomaly fails on the old code; every earlier test used a
+  height-uniform anomaly, which the ordering cannot affect.
+- ✅ **One level set, built symmetrically** (2026-10-28). The CMIP6 re-run of I.3c left
+  six models with no gate row for reasons of level bookkeeping: ACCESS-CM2 and
+  ACCESS-ESM1-5 carry `plev19` 1e-8 Pa off ERA5's (100000.00000001 Pa), so the
+  reference, put on the model's levels, was interpolated outside ERA5's range and came
+  back all-NaN; ICON-ESM-LR has levels at 3, 5 and 7 Pa above ERA5's 1 hPa top (same
+  result); and CAMS-CSM1-0, GFDL-CM4 and INM-CM4-8 publish no `ta`/`hus` at all on their
+  top `plev19` level(s) (1 hPa, and 5 hPa for two of them), which made the trapezoid NaN
+  in every model column. The level set is now:
+  1. the levels `ta` and `hus` share, matched within a relative 1e-6 (a representation
+     tolerance, `_level_rtol`, not a protocol bound), with the other cube's points
+     **snapped** onto the submission's values;
+  2. minus every level on which `ta` or `hus` is **entirely** missing (all-NaN or masked
+     over 20S–20N and the months used) on the model side;
+  3. minus every level **outside the reference's pressure range**, and every level the
+     reference has no data on (the reference is snapped onto the submission's values
+     first; a level inside its range that ERA5 does not carry is interpolated — with
+     the target levels requested in the data's own top-down order, because ESMValCore's
+     vertical interpolation returns NaN everywhere when the two orders disagree, which
+     emptied ICON-ESM-LR's reference until `96a9ac5`);
+  and **both** columns are integrated over that identical set (≥ 2 levels). A level that
+  is only partly missing (sub-surface 1000 hPa points) is kept; those columns drop out
+  of the pooled regression as before. `precip_buoyancy_levels_dropped` (a count),
+  `precip_buoyancy_top_level_pa` and `precip_buoyancy_bottom_level_pa` are emitted and
+  the dropped levels are logged with their reasons. With the stored-slope fallback only
+  steps 1–2 apply.
+- ✅ **The stored `reference_slope` stays null.** It was left null because a constant
+  seemed to be correct for one level set only (decision C.2); with the level-order bug
+  fixed that reason is gone (0.1162 on 37 levels, 0.1166 on `plev19`), so pinning one
+  is open again (decision E.4). The run-time reference on the submission's levels stays
+  the primary path. With neither a run-time nor a stored reference the model slope is
+  emitted and **no gate row** is written.
+- ✅ **The same column statistic on both sides: hydrostatic geopotential for model and
+  reference** (Duncan, 2026-10-27). ERA5 `zg` exists upstream (PR #48, merged) but is
+  not staged, so the reference column has always used the hydrostatic geopotential of
+  ERA5 `ta`/`hus`; the model column used its own published `zg` — a difference of
+  construction, not of physics. Measured with the level-order bug present it moved
+  CNRM-CM6-1's 1983–2014 slope from 0.0282 to 0.0357 (+27 %, against a ±30 % bound);
+  with the bug fixed, from 0.1164 to 0.1147 (−1.4 %). Both sides now build `z` the
+  same way, from their own `ta`/`hus` on the common levels, so staging ERA5 `zg` would
+  change nothing. **Why the surface term drops out.** The hydrostatic height is taken
+  relative to the lowest common level (1000 hPa on `plev19`), so it omits that level's
+  own height `z_b`. `z_b` is the same at every level of a column, so it adds only
+  `z_b·(p_bottom − p_top)` to ⟨h⟩: its climatology is removed exactly by the monthly
+  anomalies, and what remains — the month-to-month 1000 hPa height variation, a few
+  metres in the deep tropics, i.e. tens of J kg⁻¹ against the ~10³ J kg⁻¹ of
+  c_p·T′ + L_v·q′ — is now omitted identically on both sides instead of being present
+  on one side only.
 - Gate row `precip_buoyancy` on `|slope_model/slope_ref − 1| ≤
   `rel_tolerance_vs_obs` = 0.30`; `precip_buoyancy_slope`, `precip_buoyancy_n_levels`,
-  `precip_buoyancy_slope_ref`, `precip_buoyancy_reference_from_obs` and
+  `precip_buoyancy_n_months`, `precip_buoyancy_first_year`, `precip_buoyancy_last_year`,
+  `precip_buoyancy_levels_dropped`, `precip_buoyancy_top_level_pa`,
+  `precip_buoyancy_bottom_level_pa`, `precip_buoyancy_slope_ref`, `precip_buoyancy_reference_from_obs` and
   `precip_buoyancy_slope_rel_error` are emitted.
 - Tested on synthetic cubes with a column whose MSE anomaly is known analytically and
   a `pr` field that responds differently outside 25S–25N, so a gate that forgot the
-  tropical band would fail; the date-pairing regression reproduces the four-year lag
-  (recovered slope 0.4498 = the analytic value with the fix, −0.0272 without).
-- ⚠ **Still failing on real data, and the residue is protocol, not code.** After both
-  fixes CNRM-CM6-1 reads |model/ref − 1| ≈ 0.84 against a bound of 0.30. Two reasons to
-  look at the spec rather than the code: the regression is intrinsically noisy
-  (r ≈ 0.1 on the matched level set), and the two sides are computed over **different
-  decades** — the model over its 1850–2014 historical record, the reference over GPCP's
-  1983–2014. **Decision E.4.**
+  tropical band would fail; the date-pairing regression reproduces the four-year lag.
+  Since 2026-10-27 also: a model record of 1850–2100 whose precipitation responds three
+  times as strongly outside 1983–2014 gives exactly the slope of the same record pre-cut
+  to 1983–2014, against a reference regressed over the same 384 months; a reference
+  that ends in 2010 cuts the model to the same 336 months; the stored-slope fallback
+  keeps the model on the window; and a model with a deliberately wrong `zg`, or none,
+  gives the same slope as one with a correct `zg`. Since 2026-10-28: levels 1e-8 Pa off
+  the reference's still gate; a model level above the reference's top is dropped on both
+  sides; an entirely masked model level is dropped and the reference is integrated over
+  the same remaining levels.
+- ✅ **Real data, CNRM-CM6-1 (2026-10-27, one-gate suite through `climatebench2 score`,
+  19 `plev19` levels).** v1.0.0: model 0.02316 (1850–2014, 1980 months), reference
+  0.03402 (1983–2014, 384), |model/ref − 1| = **0.319 — fail** (the published Tier I
+  value). Now: model 0.11469 and reference 0.11664, both over the same 384 months of
+  1983–2014, |model/ref − 1| = **0.017 — pass**. Every published I.3c row was computed
+  with the level-order bug, so the Tier I I.3c results (20/51 passing, model/ref median
+  0.68, r ≈ 0.1) must be re-run; `--regate` cannot repair them. (The "0.84" once quoted
+  here predates the month pairing.)
 
 ```python
-h_col = column_integral(cp*ta + g*zg + Lv*hus)               # J/m2, monthly
-Pp, hp = monthly_anom(pr).sel(lat=slice(-20,20)), monthly_anom(h_col).sel(lat=slice(-20,20))
-slope_mod = pooled_regression(hp, Pp)                        # over time and space
-slope_obs = pooled_regression(era5_mse_anom, gpcp_pr_anom)   # -> thresholds.yml
+months = common_months(model[pr, ta, hus], gpcp.pr, era5[ta, hus], within=(1983, 2014))
+levels = common_plev(model.ta, model.hus, era5.ta, era5.hus)  # submission's values, rtol 1e-6,
+                                    # minus levels empty on either side or outside ERA5's range
+def slope(pr, ta, hus):                                      # same code for both sides
+    ta, hus = ta.sel(time=months, plev=levels), hus.sel(time=months, plev=levels)
+    z = hydrostatic_height(ta, hus)                          # never the model's zg
+    h_col = column_integral(cp*ta + g*z + Lv*hus)            # J/m2, monthly
+    Pp = monthly_anom(pr.sel(time=months)).sel(lat=slice(-20,20))
+    hp = monthly_anom(h_col).sel(lat=slice(-20,20))
+    return pooled_regression(hp, Pp)                         # over time and space
+slope_mod = slope(model.pr, model.ta, model.hus)
+slope_obs = slope(gpcp.pr, era5.ta, era5.hus)                # else stored fallback
 passes = abs(slope_mod/slope_obs - 1) <= 0.30
 ```
 
@@ -1587,8 +1721,9 @@ extra group and excluded from the entry ticket.
 # Tier II — Probabilistic scoring against post-2015 observations
 
 **Scope (paper).** Score model *ensembles* against observations over 2015–present.
-Core variables: `tas` (incl. **daily extremes**), `ts`, `pr` (incl. **intensity PDF**),
-TOA fluxes, **sea ice**. Extended: OHC, surface fluxes, cloud properties, `prw`.
+Core variables: `tas` (incl. **daily extremes**), `pr` (incl. **intensity PDF**),
+TOA fluxes, **sea ice** (`ts`, skin temperature, was dropped from the v2 protocol on
+2026-10-27 — decision B.26). Extended: OHC, surface fluxes, cloud properties, `prw`.
 **Baselines (RESTRUCTURED 2026-09).** There is now **one headline skill score per
 scorecard entry**, taken relative to the **CMIP6 multi-model ensemble**. Two further
 references are computed and reported *alongside* it as diagnostic context, not as
@@ -1817,7 +1952,7 @@ passes = abs(z) < 1.96                                       # two-sided p < 0.0
 `ClimateBench2_TierII_daily.yml` (daily/hourly cubes) run ClimateEval diagnostics
 (`AnnualMeanTimeSeries`, `AnnualCycle`, `Map`, `ZonalLine`,
 `OceanHeatContentTimeSeries`, `SeaIceExtentAnnualCycle`/`SeaIceExtentTimeSeries`,
-`Histogram`, `DiurnalCycle`) against ClimateEval DataSources (HadCRUT5, MERRA2, GPCP,
+`Histogram`, `DiurnalCycle`) against ClimateEval DataSources (HadCRUT5, GPCP,
 CERES-EBAF, ERA5Monthly/Hourly, HadISST, EN4, IAP, and CB2's staged `IMERG` and
 `MODIS`), with
 **`climatebench2.data.StagedCMIP6HistoricalSSP245`** as the comparison ensemble — the
@@ -1863,7 +1998,7 @@ gone.
   CLI materialises a copy of the suite carrying those windows and **prints every one it
   had to clip**. Partial calendar years are excluded at both ends — an annual mean over
   Jan–Sep is a seasonal-cycle artefact — so `tas` scores 2015–2022, the TOA fluxes
-  2015–2024, `ts` 2015–2021. A derived reference (`rtnt`, `phcint`) takes the
+  2015–2024. A derived reference (`rtnt`, `phcint`) takes the
   intersection of its inputs' coverage. The window is a property of the reference, so it
   is identical for every model scored on that variable; the clouds now degraded to a
   two-year window (and a scoring-pass `reason` row) instead of disappearing — until
@@ -1897,7 +2032,7 @@ gone.
 | tas monthly/annual anomalies | (a) | 🟡 scored vs **HadCRUT5 only** (paper: GISS, Berkeley Earth, HadCRUT, NOAA GlobalTemp — ClimateEval has no DataSource for the other three, so there is also no inter-product σ_obs term for `tas`; the pass's multi-product machinery needs no change to pick them up, only a suite entry, so this is purely an *upstream* gap); HadCRUT5 publishes a 200-member analysis ensemble but ClimateEval's CMORizer exposes only `tas`/`tasa` (and only `tas` is in the variable registry), so σ_obs falls back to the provisional 0.05 K constant. The GSAT **blending correction** is applied to the aggregated GMST scalars of §II.1 (gap item 6, `9d4b7a9`), not to the monthly series row. Scored over **2015–2022** — HadCRUT5's complete calendar years | `ScoredAnnualMeanTimeSeries` + `climateeval.data.HadCRUT5` |
 | tas daily extremes (TXx, TNn, TX90p, warm-spell duration) | scalars | ✅ **computed** (WP6b, `d8df85b`) — `diags.tier2_daily.ETCCDIExtremes`, suite entry `extremes`: conservative regrid to `tier2.extremes.grid` = 1°, the index per year per grid point, a cos-weighted mean over each `tier2.extremes.regions` land band, reduced to a **climatological mean + OLS trend per decade**; ❌ **still unscored** — no ClimateEval DataSource supplies daily `tasmax`/`tasmin` (ERA5's `VARIABLE_MAPPING` has neither and `ERA5Hourly` downloads one hard-wired year), so the suite gives those two variables no `reference_data:` and the pass skips a scalar with no observed value. **HadEX3** (merged upstream #53, ESMValTool CMORizer exists) is the natural reference and needs only staging. The *precipitation* half of the same entry IS scored now — see the pr row below. The old `tasmax_txx` block-maximum series stays as a deterministic display | `diags/tier2_daily.py`, `physics.annual_extreme`/`calendar_percentile`/`spell_duration_days` |
 | Perkins skill score (daily T and wet-day pr PDFs, 1 mm/day, ~1° conservative regrid, moving-baseline anomalies) | skill | ✅ (WP6b, `ce509c3` + `d8df85b`) `scoring.perkins_skill_score` = Σ min(f_m, f_o) over the pre-registered `tier2.perkins.bins`, renormalising so a density and a frequency agree; `diags.tier2_daily.PerkinsSkillScore` computes it per season for daily `tas` anomalies and wet-day (≥ 1 mm/day) `pr` intensity on the 1° conservative grid, against **ERA5Hourly** for `tas` and, since 2026-09-21, against **IMERG** for `pr` (the product Table 2 names for the daily intensity PDF; the pr entries are scored over IMERG's 2001–2014 overlap, decision B.30). It is a **skill, not an error**, so it is written as a *metric* (`perkins_<season>`, `perkins_all`) and shown in the leaderboard's own **distribution-skill table**, labelled in-sample — never in `E_ref` or `S = 1 − E/E_ref`. ⚠ the anomaly baseline is the fixed 1985–2014 monthly climatology, not a moving one | `scoring.py`, `diags/tier2_daily.py`, `leaderboard._distribution_table_html` |
-| ts (skin temperature) | (a) | ✅ (2026-09-20, `9192aaf`) — `ts` is one of the paper's nine figure variables (**RATIFIED**, decision B.26) and now has its own core-variable stanza with the comparison ensemble in `other_data`, like every other core variable. Reference **MERRA2**, not ERA5: ERA5 `ts` exists upstream (#48, merged) but only as a CDS download and the staged ERA5 has no `ts`, whereas MERRA2 `ts` is staged monthly 1980-01..2021-12 — so `ts` is scored over **2015–2021**, not the full test window. 🟡 MERRA2 is a reanalysis stand-in for a satellite skin-temperature product | suite + `climateeval.data.MERRA2` |
+| ~~ts (skin temperature)~~ | — | **Dropped 2026-10-27 (Duncan, v2 protocol; decision B.26).** `ts` had a core-variable stanza scored against **MERRA2** (`9192aaf`), a reanalysis stand-in staged 1980-01..2021-12, and was already left out of the published Fig. 4; the stanza, its `obs_sigma` and its pattern-scaling entry are removed. Model `ts` remains a Tier I / Tier III input | — |
 | tos (SST) | (a)/(b) | 🟡 scored, but against **EN4** rather than the protocol's ESACCI-SST (2026-09-20, `b9f4952`): ESACCI-SST is not staged in ClimateEval form and a reference that does not resolve leaves every `sst*` row unscored. EN4's `tos` is the objective analysis' surface level — an SST *analysis*, not a satellite retrieval — so swap the reference back the day ESACCI-SST is staged. `tos` carries the comparison ensemble (it did not before `b9f4952`, so no comparison model reached `E_ref` there) | `sst` / `sst_baseline` / `sst_map` / `sst_eof_projection` + `climateeval.data.EN4` |
 | pr anomalies | (a) | 🟡 vs **GPCP only** (IMERG, MSWEP ❌ in ClimateEval); scored over 2015–2023, GPCP's complete years | `ScoredAnnualMeanTimeSeries` + `GPCP` |
 | pr intensity PDF, Rx1day/Rx5day/R95pTOT/CDD | scalars + skill | ✅ **computed** (WP6b, `d8df85b`): all four ETCCDI precipitation indices in `ETCCDIExtremes` (Rx5day as the annual maximum 5-day running total; R95pTOT as the fraction of the **annual total** above the base-period wet-day 95th percentile; CDD truncated at the year boundary) plus the wet-day intensity PDF in the Perkins entry above. ✅ **scored since 2026-09-21** against **IMERG** (`climatebench2.data.IMERG`, the product Table 2 names): the four indices are fair-CRPS'd across the submission's members against IMERG's own scalars over **2001–2014** — the reference's complete years clipped before the reserved window, applied to model and reference alike so the two climatologies are the same statistic (decision B.30) — with `E_ref` from the `StagedCMIP6HistoricalSSP245` members that carry `day/pr`. Rx1day and Rx5day are **additionally** emitted as an annual regional series (`diags.tier2_daily.AnnualExtremeIndexSeries`, suite entry `pr_extremes_series`, **one** suite variable emitting 8 columns — ClimateEval re-loads a reference once per variable, so a variable per region would re-read the daily record eight times per source) and scored as regime (a) over the **held-out** post-2015 window, anomalised about each source's own 1985–2014 climatology — 14 years for IMERG, just above the `min_years: 10` floor. ⚠ the other four indices are in-sample only (they are defined against a base-period percentile, or are a non-Gaussian count). The old hourly `Histogram`/EMD display remains, on `ERA5Hourly`, because IMERG is daily | `diags/tier2_daily.py`, `physics.annual_max_running_sum`/`heavy_precipitation_fraction`/`max_consecutive_dry_days` |
@@ -1917,8 +2052,8 @@ gone.
 | Baselines | — | 🟡 **Climatology** row wired as a *distribution* of the 1985–2014 values per calendar month (30 pseudo-members; ⚠ CB2 interpretation, see the Tier II preamble), scored on the test-window steps, its window carried past the test cut by `ReferenceBaselineRecord` (`a3ff255`). ✅ **Pattern scaling is now scored for a GMST-type annual series** (WP6b, `ce509c3` + `74a4841`): the packaged annual ERF table (`climatebench2/data/erf_ar6_ssp245.csv`) drives `two_layer_ebm`, `calibrate_two_layer_ebm` fits **one** parameter (λ by default) by least squares to the observed GMST **through 2014** with both series reduced to anomalies about the 1985–2014 window, and `ebm_pseudo_members` displaces the trajectory by the detrended observed residuals of that window so fair CRPS is defined (⚠ CB2 interpretation, as for the climatology). The row is scored on the test window only, carries the fitted parameter in `value`, and is written for the variables of `tier2.pattern_scaling.variables` alone — a variable the EBM says nothing about gets no row, one that cannot be fitted gets a `reason`. ⚠ the ERF table is **provisional**: a linear interpolation of published AR6 anchor values with **no natural forcing**, not the AR6 annual series (TODO in its header). ❌ the **spatial** half (the normalized CMIP6-MMM warming pattern) still emits a `reason` row — but **the reason has changed and the row's text is now stale**. It names upstream PR #44; with the staged comparison ensemble the post-2015 members exist, and what is actually missing is the comparison models' **baseline-window (1985–2014) maps**: `ReferenceEOFProjection` projects only each source's *test-window* anomaly, and the reference's pre-2015 record is the only pre-2015 field any diagnostic loads. Forming `mean over models of (test-window map − baseline-window map)/ΔGMST` needs a CB2 diagnostic that reaches back past the test-window cut for the *comparison* sources, the way `ReferenceBaselineRecord` does for the reference. That is a CB2 gap, not an upstream one. ❌ no climatology baseline for **regime (b)**. **CMIP6 MME**: pooled row deleted; the headline reference is the median of per-model scores | `baselines.py`, `scoring_pass._pattern_scaling_row`/`_eof_pattern_scaling_row`, `climatebench2/data/` |
 | σ_int (piControl internal variability) | (c) | ✅ (2026-09-14, `a3ff255`) `InternalVariability` — a `CB2ComplexDiagnostic` on the `picontrol` key in the **Tier I** suite (that is where the control is loaded in full), tagged `tier2.internal_variability.requirement: diagnostic` and emitting **no** gate row. For the global-mean annual series of each core variable it finds it reports `chunked_statistic_std` of the window **mean** and the OLS **trend** at both scored window lengths — the test window and 1950–present (`tier2.long_trend_start`) — plus the lengths themselves, so the pass can match a σ_int to the record it is scoring. `score_databases` collects the rows across every database of a run, which is how the Tier I control reaches the Tier II test | `tier2_scores.InternalVariability`, `scoring_pass.collect_internal_variability` |
 | Row identity across tiers | — | ✅ (2026-09-14, `a3ff255`) Tier I gate rows carry the full `DataSourceInformation.id` (they are written per data source) while the scoring pass writes the model **name**, so one model used to appear twice on the scorecard. `leaderboard.build_scores` now maps every frame's `data_id` through the `data_sources` tables, and its gate/CRPS/consistency routing is per **row** rather than per column — the pass writes consistency rows (carrying both `passes` and `p_value`) into the same `metrics` tables as the gates | `leaderboard/_label_by_model` |
-| **CMIP6 reference ensemble for the test window** | — | ✅ (2026-09-20, `3929b8a` + `dc1efc3`) — **the blocking dependency of every earlier revision is gone.** `climatebench2.data.StagedCMIP6HistoricalSSP245` enumerates `CMIP6_<model>_historical-ssp245_<member>/<freq>/<var>/` directories under `$CLIMATEBENCH2_STAGED_CMIP6_ROOT` (defaulting to `--data-root`) and yields one `ESMValToolIntakeDataSource` subclass per (model, member) with **byte-identical data-source ids** to upstream's generator, so `group_members` stacks them exactly as it would upstream and the two are interchangeable. A **derived** variable (`rtnt`, `phcint`) yields a member only when every required input is staged for it. Why not upstream's PR #44 generator: it globs the CMIP6 pool through ESMValCore once per (diagnostic, variable) — tens of seconds a call on the DKRZ replica, ~70 calls per Tier II run — its `r*i1p1f1` facet silently drops every f2/f3 model, it has no member cap, and it falls back to intake-esgf over the network. The staged root is built to the ratified member policy (i1p1, any forcing index, first ten realizations per model); the **real run has 42 models / 160 members** | `climatebench2/data/cmip6_staged.py` |
-| **Per-variable scored window** | — | ✅ (2026-09-20, `7c99720` + `9cb9cc8`) `climatebench2/reference_windows.py` clips the protocol window to each reference's staged record, in **whole calendar years**, from the NetCDF headers. Without it every reference whose record ends before the nominal window end was dropped with a logged warning and the variable scored **nothing, silently**. Realised windows on the staged root: `tas` 2015–2022 (HadCRUT5 to 2023-09), `pr` 2015–2023 (GPCP to 2024-09), TOA 2015–2024 (CERES-EBAF to 2025-09), `ts` 2015–2021 (MERRA2 to 2021-12), `siconc` 2015–2021 (HadISST to 2021-12), clouds the full test window (MODIS, 2002-07 to present; two years while the reference was ESACCI-CLOUD, to 2016-12). The CLI prints every window it clipped; derived references take the intersection of their inputs | `reference_windows.py`, `_cli.py` |
+| **CMIP6 reference ensemble for the test window** | — | ✅ (2026-09-20, `3929b8a` + `dc1efc3`) — **the blocking dependency of every earlier revision is gone.** `climatebench2.data.StagedCMIP6HistoricalSSP245` enumerates `CMIP6_<model>_historical-ssp245_<member>/<freq>/<var>/` directories under `$CLIMATEBENCH2_STAGED_CMIP6_ROOT` (defaulting to `--data-root`) and yields one `ESMValToolIntakeDataSource` subclass per (model, member) with **byte-identical data-source ids** to upstream's generator, so `group_members` stacks them exactly as it would upstream and the two are interchangeable. A **derived** variable (`rtnt`, `phcint`) yields a member only when every required input is staged for it. Why not upstream's PR #44 generator: it globs the CMIP6 pool through ESMValCore once per (diagnostic, variable) — tens of seconds a call on the DKRZ replica, ~70 calls per Tier II run — its `r*i1p1f1` facet silently drops every f2/f3 model, it has no member cap, and it falls back to intake-esgf over the network. The generator applies the ratified member policy itself (`select_members`: `tier2.comparison_ensemble.member_pattern` = `r*i1p1f*`, i.e. i1p1 and any forcing index, and the first `max_members_per_model` = 10 realizations per model, capped per model before per-variable availability — the semantics of the staging script that built the root, moved into the package 2026-10-27 so any root yields the paper's ensemble); the **real run has 42 models / 160 members** | `climatebench2/data/cmip6_staged.py` |
+| **Per-variable scored window** | — | ✅ (2026-09-20, `7c99720` + `9cb9cc8`) `climatebench2/reference_windows.py` clips the protocol window to each reference's staged record, in **whole calendar years**, from the NetCDF headers. Without it every reference whose record ends before the nominal window end was dropped with a logged warning and the variable scored **nothing, silently**. Realised windows on the staged root: `tas` 2015–2022 (HadCRUT5 to 2023-09), `pr` 2015–2023 (GPCP to 2024-09), TOA 2015–2024 (CERES-EBAF to 2025-09), `siconc` 2015–2021 (HadISST to 2021-12), clouds the full test window (MODIS, 2002-07 to present; two years while the reference was ESACCI-CLOUD, to 2016-12). The CLI prints every window it clipped; derived references take the intersection of their inputs | `reference_windows.py`, `_cli.py` |
 
 ## II.0 Machinery as built (`climatebench2/scoring.py`, `scoring_pass.py`, `windows.py`, `diags/tier2_scores.py`, `diags/tier2_reference.py`, `baselines.py`, `leaderboard/`)
 
@@ -2739,7 +2874,7 @@ of that window's per-calendar-month values (⚠ CB2 interpretation, Tier II prea
   variability the real world is in", not that the emulator simulates noise.
   Either the manuscript adopts this reading or the baseline needs another score;
 - `scoring_pass._pattern_scaling_row` writes it as the `PatternScaling` row for
-  the variables of `tier2.pattern_scaling.variables` (`tas`/`ts`/`tos`) — scored
+  the variables of `tier2.pattern_scaling.variables` (`tas`/`tos`) — scored
   on the **test window only**, never on the years it was calibrated to, with the
   fitted parameter carried in the row's `value`. The pre-2015 observations it
   needs come from the same `ReferenceBaselineRecord` rows the climatology uses,
@@ -2993,7 +3128,7 @@ unchanged — is now built:
 | Tier | Specced diagnostics | ✅ | 🟡 | ❌ |
 |---|---|---|---|---|
 | I | 18 sub-checks (16 Table-1 rows) + 2 code-only extras; all tagged Required / Extended / extra, entry ticket over the Required group only | **18 — every Table-1 row**: I.1, I.2a, I.2b, I.3a, I.3b, **I.3c**, I.4a, I.4b, I.5a, I.5b, **I.5c**, I.5d, I.6a, I.6b, I.6c, **I.7**, I.8a, I.8b (+ Bjerknes, C–C vs their own specs); I.6a/b, I.6c and I.8a are thin CB2 gates over ClimateEval `main`'s own diagnostics. **Every Required gate produced a row on a real model (CNRM-CM6-1, 2026-09-20)** | 0 | 0 missing in code — but three of the *bounds* now look unreachable or grid-dependent on real data (I.3a, I.1, I.8a; see decisions E.1–E.3), I.3c fails at 0.84 against 0.30 (E.4), the fixed-SST and daily-`pr` gates have no staged data of their own, and I.5c still has no ERA5 temperature reference staged |
-| II | fair-CRPS engine + skill score + baselines + ~20 diagnostic families | **fair CRPS with the M = 1 rule; member stacking by model name; ESS correction; moving-block bootstrap; observational-uncertainty draws; a CMIP6-median `E_ref` with leave-one-out that is now **numerically live** over a staged 42-model / 160-member comparison ensemble; a per-variable scored window clipped to each reference's record; sea-ice extent; regime (b) as fair CRPS on the reference's fixed pre-2015 EOF basis; the aggregated-scalar regime; σ_int from piControl chunks in the consistency test; the reference's pre-test record carried past the test-window cut; one label per model across the tiers; the realized warming level and both GMST trends with the GSAT blending correction; held-out / in-sample labelling end to end; per-member runs of the Tier II events suite; the skill table in the leaderboard; the eight **ETCCDI extremes** on the 1° conservative grid, the four precipitation ones **scored against IMERG** over 2001–2014 with Rx1day/Rx5day additionally held out as an annual regional series; the **Perkins** PDF skill and its own leaderboard table; the three **seasonal-cycle** metrics; the **diurnal** first harmonic in local solar time with a (cos, sin) phase; the **pattern-scaling** baseline for GMST-type series, ERF-driven and calibrated through 2014**; deterministic metrics for tas/pr/TOA(all- and clear-sky)/prw/clouds/tos/OHC(total, 2000 m, 100 m)/sea-ice via ClimateEval | climatology baseline scored as a distribution (CB2 interpretation, ⚠) and only for regime (a); every σ_obs value — the GSAT blending factor and the packaged ERF table — provisional (⚠); the regime-(b) bootstrap axis, the model-anomaly definition, the EBM pseudo-members, the (cos, sin) phase, the per-calendar-month extremes threshold and `clt` as the low-cloud proxy are CB2 readings (⚠); Gaussian consistency null; Pinatubo `rsds` and the ITCZ shift still sign-only (no obs product); **the four TEMPERATURE ETCCDI extremes computed but unscored — no daily obs DataSource staged (HadEX3 is merged upstream); the precipitation ones are scored against IMERG, which is itself not staged yet either**; the in-sample precipitation window is CB2's reading (2001–2014, decision B.30) rather than the paper's "full historical record"; `tas` scored against HadCRUT5 alone and **only OHC has a second observational product** (EN4 beside IAP, 2026-10-28), so σ_obs has a measured inter-product term nowhere else; `tos` referenced against EN4 rather than ESACCI-SST, `ts` against MERRA-2 rather than a skin-temperature product; the clouds against MODIS Aqua alone, through `modis.ncl`'s random-overlap grid-box conversion (B.31) | surface fluxes; the **spatial** half of pattern scaling (the comparison models' baseline-window maps — a CB2 gap, not the upstream one the `reason` row still names); a regime-(b) climatology baseline |
+| II | fair-CRPS engine + skill score + baselines + ~20 diagnostic families | **fair CRPS with the M = 1 rule; member stacking by model name; ESS correction; moving-block bootstrap; observational-uncertainty draws; a CMIP6-median `E_ref` with leave-one-out that is now **numerically live** over a staged 42-model / 160-member comparison ensemble; a per-variable scored window clipped to each reference's record; sea-ice extent; regime (b) as fair CRPS on the reference's fixed pre-2015 EOF basis; the aggregated-scalar regime; σ_int from piControl chunks in the consistency test; the reference's pre-test record carried past the test-window cut; one label per model across the tiers; the realized warming level and both GMST trends with the GSAT blending correction; held-out / in-sample labelling end to end; per-member runs of the Tier II events suite; the skill table in the leaderboard; the eight **ETCCDI extremes** on the 1° conservative grid, the four precipitation ones **scored against IMERG** over 2001–2014 with Rx1day/Rx5day additionally held out as an annual regional series; the **Perkins** PDF skill and its own leaderboard table; the three **seasonal-cycle** metrics; the **diurnal** first harmonic in local solar time with a (cos, sin) phase; the **pattern-scaling** baseline for GMST-type series, ERF-driven and calibrated through 2014**; deterministic metrics for tas/pr/TOA(all- and clear-sky)/prw/clouds/tos/OHC(total, 2000 m, 100 m)/sea-ice via ClimateEval | climatology baseline scored as a distribution (CB2 interpretation, ⚠) and only for regime (a); every σ_obs value — the GSAT blending factor and the packaged ERF table — provisional (⚠); the regime-(b) bootstrap axis, the model-anomaly definition, the EBM pseudo-members, the (cos, sin) phase, the per-calendar-month extremes threshold and `clt` as the low-cloud proxy are CB2 readings (⚠); Gaussian consistency null; Pinatubo `rsds` and the ITCZ shift still sign-only (no obs product); **the four TEMPERATURE ETCCDI extremes computed but unscored — no daily obs DataSource staged (HadEX3 is merged upstream); the precipitation ones are scored against IMERG, which is itself not staged yet either**; the in-sample precipitation window is CB2's reading (2001–2014, decision B.30) rather than the paper's "full historical record"; `tas` scored against HadCRUT5 alone and **only OHC has a second observational product** (EN4 beside IAP, 2026-10-28), so σ_obs has a measured inter-product term nowhere else; `tos` referenced against EN4 rather than ESACCI-SST; the clouds against MODIS Aqua alone, through `modis.ncl`'s random-overlap grid-box conversion (B.31) | surface fluxes; the **spatial** half of pattern scaling (the comparison models' baseline-window maps — a CB2 gap, not the upstream one the `reason` row still names); a regime-(b) climatology baseline |
 | III | 3 paleo periods + monsoon check + proxy scoring + perfect model + LE spread | **the monsoon gate (with the Harrison 2015 magnitude beside it); the fair CRPS of a block pseudo-ensemble against the proxy compilations, with σ_proxy as the observational variance term and the site-consistency fraction beside it; one suite stanza per (period, dataset, variable) reading the pipeline's own NetCDFs; the App. D scored/reported split by `dataset_type`; a `tier` tag on every gate so Tier III has its own scorecard section** | Temp12k needs a zonal-mean comparison (live stanza, writes its reason); Scussolini 2019 has a reliability flag, not a σ; `block_years`/`spinup_years` are CB2 defaults (⚠); the site standard error ignores inter-site correlation (⚠); **the perfect-model path and the LE-spread test are wired end to end but have never seen data** — no CESM2/MPI-ESM/GISS-E2/CESM-LE is staged, and the variance-ratio bound is a TODO | the PMIP4 comparison ensemble behind `E_ref` — PR #45 is merged but **no PMIP4 pool is staged**, so the generator finds nothing; a PMIP4-proxy DataSource upstream; Osman 2026 LIG SST (unarchived); calibrated Osman 2021 SSTs |
 
 **Cross-cutting discrepancies (paper vs current `climatebench2/` code) — complete list,
@@ -3418,7 +3553,7 @@ ClimateEval's data and diagnostics. Items marked *upstream* are ClimateEval PRs.
    additional surface-temperature products (GISTEMP, Berkeley Earth,
    NOAAGlobalTemp, CRU TS — merged as #49, not staged; without them the GMST
    scalars have a single observational product and no inter-product σ_obs), plus
-   ESACCI-SST for `tos`, a skin-temperature product for `ts`, OSI-450 /
+   ESACCI-SST for `tos`, OSI-450 /
    NSIDC-G02202 for `siconc`, RSS, CERES SYN and BSRN. *Done since:* sea-ice
    extent (#47, discrepancy #15). *Still CB2's:* the CMIP6-MMM warming pattern
    needs the comparison models' baseline-window maps.
@@ -3501,7 +3636,7 @@ replacement: what has actually run, what it produced, and what it does *not* lic
 | I.1 energy balance, mean | **+1.45 W m⁻²** | \|μ\| < 0.1 | fails — and the bound, plus a +0.05 W m⁻² regrid bias, is the question (E.2) |
 | I.8a AMET peak latitude | **39.9°N** | 45 ± 5° | fails by one grid cell; the bound is ~one cell wide (E.3) |
 | I.3a clear-sky β | **0.71** (spatial 1.92, forced 1.75) | [1.65, 2.75] | the specified statistic cannot reach the specified window (E.1) |
-| I.3c precip–buoyancy | \|model/ref − 1\| ≈ **0.84**, r ≈ 0.1 | ≤ 0.30 | after both fixes; demanding bound on a weak statistic, mismatched windows (E.4) |
+| I.3c precip–buoyancy | \|model/ref − 1\| ≈ **0.84**, r ≈ 0.1 | ≤ 0.30 | after both fixes; demanding bound on a weak statistic, mismatched windows (E.4). *2026-10-27: 0.017, r ≈ 0.5, after the window, hydrostatic-z and level-order fixes* |
 
 **Tier II — MPI-ESM1-2-LR against a 42-model / 160-member staged comparison ensemble.**
 The monthly suite, the events suite and the scoring pass all complete; `E_ref` is a real
@@ -3566,8 +3701,8 @@ baseline window" reason rows rather than numbers.
   upstream and not staged, and ERA5 has no `tasmax`/`tasmin`. (The four precipitation
   indices are scored against IMERG as of 2026-09-21 — but IMERG itself is not staged
   yet either, so that too is synthetic-only until it is.)
-- **Scored against a stand-in:** `tos` against EN4 rather than ESACCI-SST, `ts` against
-  MERRA-2 rather than a skin-temperature product, `siconc` against HadISST rather than
+- **Scored against a stand-in:** `tos` against EN4 rather than ESACCI-SST, `siconc`
+  against HadISST rather than
   OSI-450 / NSIDC-G02202. Each is a one-line swap once the protocol's own product is
   staged, and each is commented as such in the suite.
 - **No measured σ_obs anywhere:** no variable has a second observational product on the

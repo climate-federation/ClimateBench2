@@ -27,12 +27,24 @@ What differs is only *discovery*:
   on an HPC login/compute node means a network path that bypasses the local
   pool entirely.
 
-This generator instead **enumerates directories** in a staged root that has
-already been built to the protocol's member policy
-(``runs/staging_scripts/build_comparison_root.py``): members with ``i1p1`` and
-any forcing index ``f``, capped at the first ten by realization number per
-model. The policy and the cap live in that staging step, where they are
-recorded in a manifest, rather than in a facet dict that no reviewer sees.
+This generator instead **enumerates directories** in a staged root and applies
+the protocol's **member policy** itself (:func:`select_members`, paper §5.6 and
+the Fig. 4 caption): members matching ``tier2.comparison_ensemble.
+member_pattern`` (``r*i1p1f*`` — initialisation and physics index 1, **any**
+forcing index ``f``), capped at the first
+``tier2.comparison_ensemble.max_members_per_model`` (10) by realization number
+per model. The policy used to live only in the out-of-repo staging script that
+built the Levante root, so a root built any other way (a cloud bucket, a
+mirror holding every member) silently gave a different ``E_ref``; it is now
+protocol code with its bounds in ``thresholds.yml``. On a root that staging
+script built it is a no-op — every model there already holds at most ten
+``i1p1`` members — so the databases and the frozen comparison bundle made from
+that root are unchanged.
+
+The cap is applied **per model, before** looking at any variable, exactly as
+the staging script did: a model's ensemble is its first ten qualifying members,
+fixed once, and a variable that some of them lack is scored on fewer members
+rather than on the next members in line that happen to carry it.
 
 Where the staged root is
 ------------------------
@@ -53,7 +65,8 @@ Layout it expects — ClimateEval's own
 
 A model/member/variable that has no such directory is simply not yielded, so a
 variable staged for only some members gives a smaller ensemble for that
-variable rather than an error.
+variable rather than an error. A member *directory* counts towards its model's
+cap whatever it holds.
 """
 
 from __future__ import annotations
@@ -63,11 +76,14 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from loguru import logger
+
+from climatebench2._thresholds import get_threshold
 from climateeval.data import DataSourceGenerator, DataSourceInformation
 from climateeval.data._esmvaltool_intake import ESMValToolIntakeDataSource
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
 
     from climateeval import Variable
 
@@ -91,11 +107,69 @@ _SOURCE_DIR_RE = re.compile(
     rf"^CMIP6_(?P<model>.+)_{STAGED_EXP}_(?P<member>r\d+i\d+p\d+f\d+)$",
 )
 
+#: A variant label, ``r<realization>i<initialization>p<physics>f<forcing>``.
+_VARIANT_RE = re.compile(r"^r(\d+)i(\d+)p(\d+)f(\d+)$")
+
+#: A member pattern: the same four indices, each a number or ``*`` (any).
+_MEMBER_PATTERN_RE = re.compile(r"^r(\d+|\*)i(\d+|\*)p(\d+|\*)f(\d+|\*)$")
+
 #: A CMOR filename, ``<var>_<table>_<model>_<exp>_<member>_<grid>[_<time>].nc``.
 _CMOR_FILE_RE = re.compile(
     r"^(?P<short_name>[^_]+)_(?P<mip>[^_]+)_(?P<dataset>[^_]+)_(?P<exp>[^_]+)_"
     r"(?P<ensemble>r\d+i\d+p\d+f\d+)_(?P<grid>[^_]+)(?:_(?P<time>[^_]+))?\.nc$",
 )
+
+
+def _parse_member_pattern(pattern: str) -> tuple[int | None, ...]:
+    """``"r*i1p1f*"`` -> ``(None, 1, 1, None)``; ``None`` matches any index."""
+    match = _MEMBER_PATTERN_RE.match(pattern)
+    if match is None:
+        msg = (
+            f"member pattern {pattern!r} is not of the form r<R>i<I>p<P>f<F> "
+            f"with each index a number or '*'"
+        )
+        raise ValueError(msg)
+    return tuple(None if g == "*" else int(g) for g in match.groups())
+
+
+def select_members(
+    members: Iterable[str],
+    *,
+    pattern: str | None = None,
+    cap: int | None = None,
+) -> list[str]:
+    """The members of ONE model that form its comparison ensemble, in order.
+
+    The protocol's member policy (paper §5.6, Fig. 4 caption: "its
+    ``r*i1p1f*`` members, capped at the first 10"): keep the variant labels
+    that match ``pattern`` (default ``tier2.comparison_ensemble.
+    member_pattern``), order them by **realization number** — numerically, so
+    ``r2`` precedes ``r10`` — and keep the first ``cap`` (default
+    ``tier2.comparison_ensemble.max_members_per_model``). Labels that are not
+    variants at all are ignored.
+
+    The semantics are those of ``select_members`` in the staging script that
+    built the Levante root (``runs/staging_scripts/build_comparison_root.py``)
+    exactly, ties included: two labels with the same realization number (e.g.
+    ``r1i1p1f1`` and ``r1i1p1f2``) are separate members, ordered by name. The
+    function is pure; it knows nothing of variables, so a caller that wants the
+    cap applied before per-variable availability (as the generator does) gets
+    it by construction.
+    """
+    if pattern is None:
+        pattern = get_threshold("tier2.comparison_ensemble.member_pattern")
+    if cap is None:
+        cap = int(get_threshold("tier2.comparison_ensemble.max_members_per_model"))
+    wanted = _parse_member_pattern(pattern)
+    selected: list[tuple[int, str]] = []
+    for member in set(members):
+        match = _VARIANT_RE.match(member)
+        if match is None:
+            continue
+        indices = tuple(int(g) for g in match.groups())
+        if all(w is None or w == i for w, i in zip(wanted, indices, strict=True)):
+            selected.append((indices[0], member))
+    return [member for _realization, member in sorted(selected)[:cap]]
 
 
 def staged_root(data_root_dir: Path | str | None = None) -> Path | None:
@@ -119,6 +193,9 @@ def staged_root(data_root_dir: Path | str | None = None) -> Path | None:
 #: directory walk — and the same few hundred ``Path.resolve()`` calls on
 #: symlinks into the pool — would run ~70 times per member set.
 _DISCOVERY_CACHE: dict[tuple[str, str, str], list[tuple[str, str, list[Path]]]] = {}
+
+#: ``root -> [(model, member, source_dir)]`` that pass the member policy.
+_MEMBER_CACHE: dict[str, list[tuple[str, str, Path]]] = {}
 
 #: ``(root, model) -> institute``.
 _INSTITUTE_CACHE: dict[tuple[str, str], str] = {}
@@ -176,6 +253,38 @@ def _required_var_names(variable: Variable) -> list[str]:
         return [variable.var_name]
 
 
+def _ensemble_members(root: Path) -> list[tuple[str, str, Path]]:
+    """``[(model, member, source_dir)]`` of the comparison ensemble in ``root``.
+
+    Every ``CMIP6_<model>_historical-ssp245_<member>`` directory is grouped by
+    model and passed through :func:`select_members`, **before** any variable
+    is looked at, so a model's members are the same for every variable.
+    Sorted by directory name, the order the walk has always yielded.
+    """
+    key = str(root)
+    if key in _MEMBER_CACHE:
+        return _MEMBER_CACHE[key]
+    by_model: dict[str, dict[str, Path]] = {}
+    for source_dir in root.iterdir():
+        match = _SOURCE_DIR_RE.match(source_dir.name)
+        if match is None or not source_dir.is_dir():
+            continue
+        by_model.setdefault(match["model"], {})[match["member"]] = source_dir
+    members: list[tuple[str, str, Path]] = []
+    for model, dirs in by_model.items():
+        selected = select_members(dirs)
+        if len(selected) < len(dirs):
+            logger.info(
+                f"Comparison ensemble: {model} keeps {len(selected)} of the "
+                f"{len(dirs)} members staged in {root} (member policy "
+                f"tier2.comparison_ensemble)",
+            )
+        members.extend((model, member, dirs[member]) for member in selected)
+    members.sort(key=lambda item: item[2].name)
+    _MEMBER_CACHE[key] = members
+    return members
+
+
 def _discover(root: Path, variable: Variable) -> list[tuple[str, str, list[Path]]]:
     """``[(model, member, files)]`` staged for one variable, cached per root."""
     key = (str(root), variable.frequency, variable.var_name)
@@ -183,10 +292,7 @@ def _discover(root: Path, variable: Variable) -> list[tuple[str, str, list[Path]
         return _DISCOVERY_CACHE[key]
     var_names = _required_var_names(variable)
     found: list[tuple[str, str, list[Path]]] = []
-    for source_dir in sorted(root.iterdir()):
-        match = _SOURCE_DIR_RE.match(source_dir.name)
-        if match is None or not source_dir.is_dir():
-            continue
+    for model, member, source_dir in _ensemble_members(root):
         files: list[Path] = []
         for var_name in var_names:
             var_dir = source_dir / variable.frequency / var_name
@@ -196,7 +302,7 @@ def _discover(root: Path, variable: Variable) -> list[tuple[str, str, list[Path]
                 break
             files.extend(var_files)
         if files:
-            found.append((match["model"], match["member"], files))
+            found.append((model, member, files))
     _DISCOVERY_CACHE[key] = found
     return found
 
@@ -310,6 +416,7 @@ class StagedMemberDataSource(ESMValToolIntakeDataSource):
 def clear_discovery_cache() -> None:
     """Forget the staged-root directory walk (used by the tests)."""
     _DISCOVERY_CACHE.clear()
+    _MEMBER_CACHE.clear()
     _INSTITUTE_CACHE.clear()
 
 
@@ -318,8 +425,9 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
 
     Yields one :class:`StagedMemberDataSource` (an
     :class:`~climateeval.data._esmvaltool_intake.ESMValToolIntakeDataSource`)
-    subclass per staged ``(model, member)`` that actually carries the variable,
-    with
+    subclass per staged ``(model, member)`` that passes the member policy
+    (:func:`select_members`, applied per model before any variable is looked
+    at) and actually carries the variable, with
 
     * ``name`` = the model, ``category`` = ``CMIP6``, ``exp`` =
       ``historical-ssp245``, ``variant`` = the member — i.e. the data source id
@@ -339,7 +447,7 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
         "exp": list(STAGED_EXP_FACET),
         "dataset": "*",
         "institute": "*",
-        "ensemble": "r*i1p1f*",
+        "ensemble": get_threshold("tier2.comparison_ensemble.member_pattern"),
         "grid": "*",
         "timerange": "19790101/*",
     }

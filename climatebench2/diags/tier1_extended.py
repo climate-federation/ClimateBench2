@@ -46,6 +46,7 @@ from climatebench2.diags.tier1_physics import (
 )
 from climateeval import Variable
 from climateeval._config import setup_esmvaltool_config_and_logging
+from climateeval._utils import get_prepared_cube
 from climateeval.data import GPCP, ERA5Monthly, HadISST
 
 if TYPE_CHECKING:
@@ -122,14 +123,37 @@ def align_on_common_months(*cubes: Cube) -> list[Cube]:
 
     The monthly counterpart of :func:`align_on_common_days`, and needed for
     the same reason. I.3c pairs a *precipitation* product with a *reanalysis*
-    thermodynamic profile, and the two never cover the same years: GPCP
-    starts in 1983, ERA5 in 1979, so ``reference_windows.clip_to_source``
-    hands the gate a 1983-2014 ``pr`` and a 1979-2014 ``ta``/``hus``.
-    Truncating both to the shorter length regressed GPCP 1983-2014 on ERA5
-    1979-2010 — a four-year offset that turned the observed
-    precipitation-buoyancy slope negative.
+    thermodynamic profile, and the two need not cover the same years: GPCP
+    starts in 1983, ERA5 in 1979, so while the protocol window still began in
+    1979 ``reference_windows.clip_to_source`` handed the gate a 1983-2014
+    ``pr`` and a 1979-2014 ``ta``/``hus``. Truncating both to the shorter
+    length regressed GPCP 1983-2014 on ERA5 1979-2010 — a four-year offset
+    that turned the observed precipitation-buoyancy slope negative. I.3c also
+    pairs the model's fields with the reference's this way, so both sides are
+    regressed over one month set.
     """
     return _align_on_common_times(cubes, _month_keys, "calendar month")
+
+
+def restrict_to_years(cube: Cube, first: int, last: int) -> Cube:
+    """Cut a cube to the time steps in calendar years ``first``–``last``.
+
+    I.3c's protocol window (``tier1.precip_buoyancy.obs_window``) applied to
+    a model record the CLI hands over in full — 1850–2014, or 1850–2100 when
+    the historical run is spliced onto a scenario. By calendar date, like
+    :func:`align_on_common_months`, so any calendar works.
+    """
+    keys = _month_keys(cube)
+    inside = (keys >= first * 100 + 1) & (keys <= last * 100 + 12)
+    if not inside.any():
+        msg = f"The record has no month in {first}-{last}"
+        raise ValueError(msg)
+    if inside.all():
+        return cube
+    time_axis = cube.coord_dims("time")[0]
+    slicer: list[slice | np.ndarray] = [slice(None)] * cube.ndim
+    slicer[time_axis] = np.flatnonzero(inside)
+    return cube[tuple(slicer)]
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +590,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
 class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     """I.3c: tropical P′-on-column-MSE′ slope within ±30% of GPCP/ERA5.
 
-    Column moist static energy ``h = c_p·ta + g·zg + L_v·hus`` is integrated
+    Column moist static energy ``h = c_p·ta + g·z + L_v·hus`` is integrated
     over the pressure levels the monthly Amon data actually carry
     (``∫ h dp/g``, :func:`physics.mass_weighted_column_integral`); the
     monthly anomalies of precipitation and of ⟨h⟩ over 20S–20N are then
@@ -574,22 +598,52 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     (:func:`physics.pooled_regression_slope`). Slope units are
     mm day⁻¹ per MJ m⁻², so the number is O(0.1–1) rather than O(1e-7).
 
+    **One window, one month set** (paper App. B.3: "over 1983–2014, the
+    period of the GPCP/ERA5 reference"). The model is regressed over
+    ``tier1.precip_buoyancy.obs_window`` and nothing else — never its whole
+    historical record, which the CLI hands over in full and which a spliced
+    historical+SSP run extends to 2100 — and, when the reference is computed,
+    over exactly the calendar months the GPCP/ERA5 fields share inside that
+    window (:func:`align_on_common_months` across all six fields). With the
+    stored ``reference_slope`` fallback the model still uses the protocol
+    window alone. ``precip_buoyancy_n_months`` and the first/last year are
+    emitted so a row says which months it was regressed over.
+
+    **The same column statistic on both sides.** ``g·z`` is the hydrostatic
+    geopotential of each side's **own** ``ta``/``hus`` on the common levels
+    (:func:`physics.hydrostatic_height`), for the model as for ERA5; the
+    model's ``zg`` is not read. ClimateEval's ERA5 mapping has no ``zg``, so
+    the reference had to be hydrostatic, and mixing a hydrostatic reference
+    with the model's published ``zg`` is a difference of construction, not
+    of physics (on CNRM-CM6-1, 1983–2014: 0.1164 with ``zg``, 0.1147
+    hydrostatic; +27 % while the level-ordering bug below was present). The
+    hydrostatic height is taken relative to the lowest common level (1000 hPa
+    on ``plev19``), so it omits that level's own height ``z_b``. Because
+    ``z_b`` is the same at every level of a column, it adds only
+    ``z_b·(p_bottom − p_top)`` to ⟨h⟩: its climatology is removed exactly by
+    the monthly anomalies, and what is left — the month-to-month variation of
+    the 1000 hPa height, a few metres in the deep tropics, i.e. tens of J/kg
+    against the ~10³ J/kg of ``c_p·T′ + L_v·q′`` — is now omitted identically
+    from the model and the reference rather than present on one side only.
+
     The reference slope is the same statistic from GPCP ``pr`` and ERA5
-    ``ta``/``hus``/``zg`` over ``tier1.precip_buoyancy.obs_window``, computed
-    at run time when those data are obtainable and otherwise read from
-    ``tier1.precip_buoyancy.reference_slope`` (null until Duncan pins it).
-    With neither available the model slope is emitted alone and no gate row
-    is written. The reference column is integrated over the **submission's
-    own** pressure levels, not ERA5's: the slope is as much a property of
-    the vertical discretisation as of the atmosphere (see
-    :meth:`_reference_slope`), so a stored constant can only ever be right
-    for one level set — which is why the run-time reference is preferred and
+    ``ta``/``hus``, computed at run time when those data are obtainable and
+    otherwise read from ``tier1.precip_buoyancy.reference_slope`` (null by
+    design). With neither available the model slope is emitted alone and no
+    gate row is written. The reference column is integrated over the
+    **submission's own** pressure levels, not ERA5's (paper App. B.3), and
     ``precip_buoyancy_n_levels`` is reported alongside the slope.
 
-    ⚠ ClimateEval's ``ERA5.VARIABLE_MAPPING`` has no ``zg`` (an upstream
-    gap), so the reference column is built with a hydrostatic geopotential
-    from ERA5 ``ta``/``hus`` (:func:`physics.hydrostatic_height`); the
-    missing surface term is constant in time and drops out of the anomalies.
+    **Each level is weighted by its own pressure** (fixed 2026-10-27).
+    ``extract_levels`` keeps a file's level order when the requested levels
+    are a subset of its own, and CMIP6 and ERA5 files run top-down from
+    1000 hPa, but the column integral used to be handed the *ascending*
+    level list — so the 1000 hPa field was integrated as if it sat at the
+    top of the column, on both sides. That bug, not the vertical
+    discretisation, is what made the slope look level-set dependent: on the
+    staged ERA5 (20S–20N, 1983–2014) it gave 0.034 on ``plev19`` and 0.146 on
+    ERA5's 37 levels, where the correct column gives 0.1166 and 0.1162
+    mm/day per MJ/m² (r ≈ 0.48).
     """
 
     _required_data_keys = ("historical",)
@@ -598,6 +652,10 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     _band: ClassVar[tuple[float, float]] = (-20.0, 20.0)
     #: J/m² → MJ/m², so the reported slope is O(0.1–1).
     _mse_scale: ClassVar[float] = 1.0e6
+    #: Relative tolerance for "the same pressure level" across products: a
+    #: numerical-representation tolerance, not a protocol bound (ACCESS-CM2's
+    #: plev19 is 100000.00000001 Pa where ERA5 has 100000).
+    _level_rtol: ClassVar[float] = 1.0e-6
 
     _gate_checks = (
         GateCheck(
@@ -609,16 +667,85 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         ),
     )
 
-    # -- the column integral ------------------------------------------------
+    # -- the window and the column integral ---------------------------------
 
     @staticmethod
-    def _common_levels(ta: Cube, zg: Cube, hus: Cube) -> list[float]:
-        """The pressure levels all three profiles carry (Pa, ascending)."""
-        levels = sorted(
-            set(ta.coord("air_pressure").points.astype(float))
-            & set(zg.coord("air_pressure").points.astype(float))
-            & set(hus.coord("air_pressure").points.astype(float)),
+    def _protocol_years() -> tuple[int, int]:
+        """``tier1.precip_buoyancy.obs_window`` as (first, last) year."""
+        first, last = get_threshold("tier1.precip_buoyancy.obs_window")
+        return int(first), int(last)
+
+    def _model_cube(self, data: CubeList | Dataset, name: str) -> Cube:
+        """One model field cut to the protocol window, then regridded.
+
+        Cut first: a 1850–2100 ``ta`` on ``plev19`` is ten times the data the
+        regression uses.
+        """
+        cube = get_prepared_cube(data, _mon(name))
+        return self._regridded(restrict_to_years(cube, *self._protocol_years()))
+
+    @classmethod
+    def _match_level(cls, level: float, candidates: np.ndarray) -> int | None:
+        """Index of the candidate within ``_level_rtol`` of ``level``, if any."""
+        close = np.flatnonzero(
+            np.isclose(candidates, level, rtol=cls._level_rtol, atol=0.0),
         )
+        return int(close[0]) if close.size else None
+
+    @classmethod
+    def _snap_levels(cls, cube: Cube, levels: list[float]) -> None:
+        """Give ``cube``'s pressure points within tolerance of ``levels`` those values.
+
+        In place, on a cube the gate created itself (a regrid output): the
+        submission's level values become the common vocabulary, so the
+        ``extract_levels`` that follows takes them by exact match instead of
+        interpolating to a level 1e-8 Pa away — which ESMValCore treats as
+        outside the source range and fills with NaN.
+        """
+        coord = cube.coord("air_pressure")
+        points = coord.points.astype(float).copy()
+        targets = np.asarray(levels, dtype=float)
+        for index, point in enumerate(points):
+            match = cls._match_level(point, targets)
+            if match is not None:
+                points[index] = targets[match]
+        if not np.array_equal(points, coord.points):
+            coord.points = points.astype(coord.dtype)
+
+    @staticmethod
+    def _on_levels(cube: Cube, levels: list[float]) -> Cube:
+        """``extract_levels(cube, levels, "linear")``, asked in the cube's own order.
+
+        ESMValCore's vertical *interpolation* returns NaN on every target
+        level when the targets run the opposite way to the source: CMIP6 and
+        ERA5 run top-down from 1000 hPa, and the ascending list this gate
+        holds left ERA5 with data on 1 of ICON-ESM-LR's 29 in-range levels
+        (it carries several ERA5 lacks, so the extraction interpolates). By
+        exact match the order never mattered, which is why every model on
+        ``plev19`` — a subset of ERA5's levels — was unaffected.
+        """
+        points = cube.coord("air_pressure").points
+        descending = points.size > 1 and points[0] > points[-1]
+        ordered = sorted(levels, reverse=bool(descending))
+        with setup_esmvaltool_config_and_logging():
+            return extract_levels(cube, ordered, "linear")
+
+    @classmethod
+    def _common_levels(cls, ta: Cube, hus: Cube) -> list[float]:
+        """The pressure levels both profiles carry (Pa, ascending, ``ta``'s values).
+
+        Matched within ``_level_rtol``, and ``hus`` is snapped onto ``ta``'s
+        values, so a representation offset between the two files cannot
+        empty the set.
+        """
+        ta_points = ta.coord("air_pressure").points.astype(float)
+        hus_points = hus.coord("air_pressure").points.astype(float)
+        levels = sorted(
+            float(level)
+            for level in ta_points
+            if cls._match_level(level, hus_points) is not None
+        )
+        cls._snap_levels(hus, levels)
         if len(levels) < 2:  # noqa: PLR2004
             msg = (
                 f"need at least two common pressure levels for the column "
@@ -627,34 +754,111 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
             raise ValueError(msg)
         return levels
 
+    def _levels_with_data(
+        self,
+        ta: Cube,
+        hus: Cube,
+        levels: list[float],
+        side: str,
+    ) -> tuple[list[float], dict[float, str]]:
+        """(the ``levels`` on which ``ta`` AND ``hus`` hold data, {dropped: why}).
+
+        A level is dropped when either field is entirely missing on it —
+        all-NaN or masked over 20S–20N and every month passed in — after
+        being put on ``levels`` exactly as the column integral will put it.
+        One such level makes the trapezoid NaN in every column (CAMS-CSM1-0,
+        GFDL-CM4 and INM-CM4-8 publish nothing at 1 or 5 hPa), so it is left
+        out rather than allowed to void the statistic. A level that is only
+        partly missing (sub-surface 1000 hPa points) is kept: those columns
+        drop out of the pooled regression as before.
+        """
+        present: dict[float, bool] = dict.fromkeys(levels, True)
+        for cube in (ta, hus):
+            cube = self._on_levels(self._tropical_band(cube), levels)
+            axis = cube.coord_dims("air_pressure")[0]
+            finite = np.isfinite(_filled(cube.data))
+            others = tuple(i for i in range(finite.ndim) if i != axis)
+            has_data = finite.any(axis=others)
+            for level, ok in zip(
+                cube.coord("air_pressure").points.astype(float),
+                has_data,
+                strict=True,
+            ):
+                index = self._match_level(level, np.asarray(levels, dtype=float))
+                if index is not None and not ok:
+                    present[levels[index]] = False
+        kept = [level for level in levels if present[level]]
+        dropped = {
+            level: f"no {side} ta/hus data over 20S-20N"
+            for level in levels
+            if not present[level]
+        }
+        return kept, dropped
+
+    def _reference_levels(
+        self,
+        ta: Cube,
+        hus: Cube,
+        levels: list[float],
+    ) -> tuple[list[float], dict[float, str]]:
+        """The submission's ``levels`` the reference can be put on, and the rest.
+
+        The reference's own points are snapped onto the submission's values
+        (within ``_level_rtol``); a level outside the reference's pressure
+        range is dropped (ICON-ESM-LR's 3, 5 and 7 Pa lie above ERA5's 1 hPa
+        top, and ``extract_levels`` returns NaN there), and so is one the
+        reference has no data on. Levels inside the range that ERA5 does not
+        carry are interpolated, as before.
+        """
+        for cube in (ta, hus):
+            self._snap_levels(cube, levels)
+        points = np.concatenate(
+            [c.coord("air_pressure").points.astype(float) for c in (ta, hus)],
+        )
+        low = max(c.coord("air_pressure").points.min() for c in (ta, hus))
+        high = min(c.coord("air_pressure").points.max() for c in (ta, hus))
+        inside = [
+            level
+            for level in levels
+            if (low <= level <= high) or self._match_level(level, points) is not None
+        ]
+        dropped = {
+            level: "outside the reference's pressure range"
+            for level in levels
+            if level not in inside
+        }
+        if len(inside) < 2:  # noqa: PLR2004
+            return inside, dropped
+        kept, missing = self._levels_with_data(ta, hus, inside, "reference")
+        return kept, {**dropped, **missing}
+
     def _column_mse(
         self,
         ta: Cube,
-        zg: Cube,
         hus: Cube,
         levels: list[float] | None = None,
     ) -> tuple[np.ndarray, Cube]:
-        """(⟨h⟩ in J/m² with shape (time, lat, lon), the cube it came from)."""
+        """(⟨h⟩ in J/m² with shape (time, lat, lon), the cube it came from).
+
+        ``g·z`` is the hydrostatic geopotential of these ``ta``/``hus`` on
+        ``levels``, built **after** both are put on those levels, so the
+        model and the reference construct it identically (see the class
+        docstring for why its missing surface term does not matter).
+        """
         if levels is None:
-            levels = self._common_levels(ta, zg, hus)
-        with setup_esmvaltool_config_and_logging():
-            ta, zg, hus = (
-                extract_levels(cube, levels, "linear") for cube in (ta, zg, hus)
-            )
+            levels = self._common_levels(ta, hus)
+        ta, hus = (self._on_levels(cube, levels) for cube in (ta, hus))
         axis = ta.coord_dims("air_pressure")[0]
-        mse = physics.moist_static_energy(
-            _filled(ta.data),
-            _filled(zg.data),
-            _filled(hus.data),
-        )
-        return (
-            physics.mass_weighted_column_integral(
-                mse,
-                np.asarray(levels, dtype=float),
-                axis=axis,
-            ),
-            ta,
-        )
+        # The cube's OWN level order, never `levels`: `extract_levels` keeps a
+        # file's order when the levels are a subset of its own, and CMIP6/ERA5
+        # files run top-down from 1000 hPa, so pairing the data with the sorted
+        # list integrated the 1000 hPa field as if it were the column top.
+        plev = ta.coord("air_pressure").points.astype(float)
+        t = _filled(ta.data)
+        q = _filled(hus.data)
+        z = physics.hydrostatic_height(t, q, plev, axis=axis)
+        mse = physics.moist_static_energy(t, z, q)
+        return physics.mass_weighted_column_integral(mse, plev, axis=axis), ta
 
     def _tropical_band(self, cube: Cube) -> Cube:
         with setup_esmvaltool_config_and_logging():
@@ -670,27 +874,25 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         self,
         pr: Cube,
         ta: Cube,
-        zg: Cube,
         hus: Cube,
         levels: list[float] | None = None,
     ) -> float:
         """Pooled slope of P′ (mm/day) on ⟨h⟩′ (MJ/m²) over 20S–20N.
 
-        The four inputs are paired **by calendar month** first. On the model
-        side they come from one experiment and already agree, but the
-        observational reference pairs GPCP with ERA5 over records that start
-        four years apart (see :func:`align_on_common_months`), and both the
+        The three inputs are paired **by calendar month** first. On the model
+        side they come from one experiment and normally agree, but the
+        observational reference pairs GPCP with ERA5 over records that can
+        start years apart (see :func:`align_on_common_months`), and both the
         anomaly climatology and the pooled regression need the same months
-        on both sides.
+        on all three.
 
         ``levels`` is the pressure-level set the column is integrated over.
-        The caller passes the **model's** levels for the reference too: the
-        slope is a property of the vertical discretisation as much as of the
-        atmosphere (see ``_reference_slope``).
+        The caller passes the **model's** levels for the reference too
+        (paper App. B.3; see ``_reference_slope``).
         """
-        pr, ta, zg, hus = align_on_common_months(pr, ta, zg, hus)
-        pr, ta, zg, hus = (self._tropical_band(c) for c in (pr, ta, zg, hus))
-        column, level_cube = self._column_mse(ta, zg, hus, levels)
+        pr, ta, hus = align_on_common_months(pr, ta, hus)
+        pr, ta, hus = (self._tropical_band(c) for c in (pr, ta, hus))
+        column, level_cube = self._column_mse(ta, hus, levels)
         _years, months = _cube_years_months(level_cube)
         h_anom = physics.deseasonalised_anomalies(column, months) / self._mse_scale
         with setup_esmvaltool_config_and_logging():
@@ -701,16 +903,19 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     # -- the observational reference ----------------------------------------
 
     def _observation_cube(self, source: type[DataSource], var_name: str) -> Cube:
+        """One observational field over the protocol window, clipped to its record.
+
+        ClimateEval refuses a range a staged record does not cover
+        (``MissingDataError``), which would send the whole reference slope
+        down the fallback path, so the window is clipped per product; the
+        products are then paired on their common months with the model.
+        """
         from climatebench2 import reference_windows
 
-        first, last = get_threshold("tier1.precip_buoyancy.obs_window")
+        first, last = self._protocol_years()
         product = source()
-        # The protocol's observation window is 1979-2014, but GPCP starts in
-        # 1983 and ClimateEval refuses a range its record does not cover
-        # (MissingDataError), which sends the whole reference slope down the
-        # fallback path. Ask for the overlap instead.
         timerange = reference_windows.clip_to_source(
-            windows.timerange(int(first), int(last)),
+            windows.timerange(first, last),
             self.data_root_dir,
             product.id,
             "mon",
@@ -725,47 +930,68 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
             ),
         )
 
-    def _observed_slope(self, levels: list[float] | None = None) -> float:
-        """Return the GPCP/ERA5 reference slope over the protocol's window."""
-        pr = self._observation_cube(GPCP, "pr")
-        ta = self._observation_cube(ERA5Monthly, "ta")
-        hus = self._observation_cube(ERA5Monthly, "hus")
-        try:
-            zg = self._observation_cube(ERA5Monthly, "zg")
-        except Exception as exc:  # noqa: BLE001 - ERA5 has no zg upstream
-            logger.warning(
-                f"Diagnostic '{self.name}': ERA5 provides no 'zg' through "
-                f"ClimateEval ({type(exc).__name__}: {exc}) — using the "
-                f"hydrostatic geopotential of ta/hus for the reference column",
-            )
-            zg = ta.copy(
-                physics.hydrostatic_height(
-                    _filled(ta.data),
-                    _filled(hus.data),
-                    ta.coord("air_pressure").points.astype(float),
-                    axis=ta.coord_dims("air_pressure")[0],
-                ),
-            )
-        return self._slope(pr, ta, zg, hus, levels)
+    def _observed_slope(
+        self,
+        model: tuple[Cube, Cube, Cube],
+        levels: list[float],
+    ) -> tuple[float, tuple[Cube, Cube, Cube], list[float], dict[float, str]]:
+        """(GPCP/ERA5 slope, model fields on its months, levels used, dropped).
+
+        ``model`` is the submission's ``(pr, ta, hus)`` already cut to the
+        protocol window. All six fields are cut to the calendar months every
+        one of them has, so the reference and the model are regressed over
+        the identical month set — a reference product that ends early, or a
+        model record with a gap, shortens both sides alike. ``levels`` (the
+        submission's usable levels) are narrowed to those the reference can
+        also be put on (:meth:`_reference_levels`); the caller integrates
+        the model over the same narrowed set.
+        """
+        observed = (
+            self._observation_cube(GPCP, "pr"),
+            self._observation_cube(ERA5Monthly, "ta"),
+            self._observation_cube(ERA5Monthly, "hus"),
+        )
+        aligned = align_on_common_months(*model, *observed)
+        pr, ta, hus = aligned[3:]
+        levels, dropped = self._reference_levels(ta, hus, levels)
+        if len(levels) < 2:  # noqa: PLR2004
+            msg = f"the reference shares fewer than two levels with the model: {levels}"
+            raise ValueError(msg)
+        return (
+            self._slope(pr, ta, hus, levels),
+            (aligned[0], aligned[1], aligned[2]),
+            levels,
+            dropped,
+        )
 
     def _reference_slope(
         self,
-        levels: list[float] | None = None,
-    ) -> tuple[float | None, bool]:
-        """Return (reference slope, whether it came from the observations).
+        model: tuple[Cube, Cube, Cube],
+        levels: list[float],
+    ) -> tuple[
+        float | None,
+        bool,
+        tuple[Cube, Cube, Cube],
+        list[float],
+        dict[float, str],
+    ]:
+        """(reference slope, from observations?, model fields, levels, dropped).
 
-        ``levels`` are the **model's** pressure levels. The column integral
-        is a trapezoid over whatever levels the data carry, and the tropical
-        P′-on-⟨h⟩′ slope depends strongly on how finely the lower
-        troposphere is resolved: on CNRM-CM6-1's ``plev19`` the same ERA5
-        record gives 0.034 mm/day per MJ/m² (r = 0.11), on ERA5's own 37
-        levels 0.146 (r = 0.42). Integrating the two sides over different
-        level sets therefore compares the discretisations, not the models —
-        which is what ``mass_weighted_column_integral``'s docstring warns
-        about — so the reference is restricted to the model's levels.
+        The model fields come back cut to the months the reference used, and
+        the levels narrowed to those the reference also carries; with the
+        stored fallback both come back unchanged (the protocol window, the
+        submission's usable levels).
+
+        ``levels`` are the **model's** pressure levels: the column integral
+        is a trapezoid over whatever levels the data carry, so the paper
+        computes the reference on the submission's own level set and the
+        two columns span the same partial column. (The strong level-set
+        dependence once quoted here — 0.034 on ``plev19`` against 0.146 on
+        ERA5's 37 levels — was the level-ordering bug of ``_column_mse``;
+        with it fixed the two give 0.1166 and 0.1162.)
         """
         try:
-            return self._observed_slope(levels), True
+            reference, model, used, dropped = self._observed_slope(model, levels)
         except Exception as exc:
             if self._fail_on_missing_data:
                 raise
@@ -774,32 +1000,60 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
                 f"({type(exc).__name__}: {exc}); falling back to "
                 f"tier1.precip_buoyancy.reference_slope",
             )
+        else:
+            return reference, True, model, used, dropped
         stored = get_threshold("tier1.precip_buoyancy.reference_slope")
         if stored is None:
             logger.warning(
                 f"Diagnostic '{self.name}': tier1.precip_buoyancy."
                 f"reference_slope is null, so I.3c reports the model slope "
-                f"without a gate row (TODO: pin the reference slope)",
+                f"without a gate row",
             )
-            return None, False
-        return float(stored), False
+            return None, False, model, levels, {}
+        return float(stored), False, model, levels, {}
 
     def _calculate_raw_output(
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
         historical = complex_data_source.data["historical"]
-        pr, ta, zg, hus = (
-            self._cube(historical, _mon(name)) for name in ("pr", "ta", "zg", "hus")
+        pr, ta, hus = (
+            self._model_cube(historical, name) for name in ("pr", "ta", "hus")
         )
-        levels = self._common_levels(ta, zg, hus)
-        slope = self._slope(pr, ta, zg, hus, levels)
+        model = align_on_common_months(pr, ta, hus)
+        # One level set for both sides: the levels the submission carries
+        # (matched within tolerance), minus any it has no data on, minus any
+        # the reference cannot be put on or has no data on.
+        levels = self._common_levels(model[1], model[2])
+        levels, dropped = self._levels_with_data(model[1], model[2], levels, "model")
+        if len(levels) < 2:  # noqa: PLR2004
+            msg = f"the model has data on fewer than two levels: {levels}"
+            raise ValueError(msg)
+        reference, from_observations, model, levels, more = self._reference_slope(
+            (model[0], model[1], model[2]),
+            levels,
+        )
+        dropped.update(more)
+        if dropped:
+            listed = ", ".join(
+                f"{level:g} Pa ({why})" for level, why in sorted(dropped.items())
+            )
+            logger.warning(
+                f"Diagnostic '{self.name}': I.3c integrates both columns over "
+                f"{len(levels)} levels; dropped {listed}",
+            )
+        slope = self._slope(*model, levels)
+        years, _months = _cube_years_months(model[0])
         values = {
             "precip_buoyancy_slope": slope,
             "precip_buoyancy_n_levels": float(len(levels)),
+            "precip_buoyancy_levels_dropped": float(len(dropped)),
+            "precip_buoyancy_top_level_pa": float(min(levels)),
+            "precip_buoyancy_bottom_level_pa": float(max(levels)),
+            "precip_buoyancy_n_months": float(years.size),
+            "precip_buoyancy_first_year": float(years.min()),
+            "precip_buoyancy_last_year": float(years.max()),
         }
-
-        reference, from_observations = self._reference_slope(levels)
         if reference is not None and np.isfinite(reference) and reference != 0.0:
             values["precip_buoyancy_slope_ref"] = reference
             values["precip_buoyancy_reference_from_obs"] = float(from_observations)

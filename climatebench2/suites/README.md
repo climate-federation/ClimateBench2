@@ -35,7 +35,7 @@ protocol constants from `thresholds.yml`, so their suite entries keep
 |---|---|---|---|---|
 | `ClimateBench2_TierI` | experiment dict (`picontrol`, `4xco2`, `histaer`, `historical`, `day`, `amip`, `amip4xco2`, `patch_ep`, `patch_wp`) | full | no | 17 physical-consistency gates: ECS, energy balance, closures, clear-sky β, precip–buoyancy, land–ocean, Arctic, aerosol ERF, MHT, ITCZ–EFE, ENSO teleconnections, geostrophic balance, MJO, amip-4xCO2 ERF, GFMIP Δλ + the Bjerknes and C–C extras — **plus** `internal_variability`, which is not a gate: it reports the piControl σ_int the Tier II consistency test needs, and rides here because this is where the control is loaded in full |
 | `ClimateBench2_TierI_variability` | cubes (monthly `tos`), from `picontrol` | full (≥ 100 yr) | no | ENSO amplitude + spectral-shape gates |
-| `ClimateBench2_TierII` | cubes (monthly) | post-2015 test window, **clipped per variable to its reference's record** | **yes** | Core variables vs HadCRUT5 (`tas`), MERRA2 (`ts`), GPCP (`pr`), CERES-EBAF (all-sky **and clear-sky** TOA: `rsut`/`rlut`/`rtnt`/`rsutcs`/`rlutcs`, and the cloud radiative effects `swcre`/`lwcre`), ERA5 (`prw`), MODIS Aqua MYD08_M3 (`clt`/`clwvi`/`clivi`), EN4 (`tos`), IAP (OHC, from `thetao`, EN4 as second product) and HadISST (`siconc`, as **extent**) — plus OHC (total, 0–2000 m **and 0–100 m**), `reference_baseline` / `sst_baseline` (the reference's pre-test 1985–2014 record) and `eof_projection` / `sst_eof_projection` (the regime-(b) coefficients on the reference's fixed pre-2015 EOF basis). Every core variable carries the **staged CMIP6 comparison ensemble** in `other_data` |
+| `ClimateBench2_TierII` | cubes (monthly) | post-2015 test window, **clipped per variable to its reference's record** | **yes** | Core variables vs HadCRUT5 (`tas`), GPCP (`pr`), CERES-EBAF (all-sky **and clear-sky** TOA: `rsut`/`rlut`/`rtnt`/`rsutcs`/`rlutcs`, and the cloud radiative effects `swcre`/`lwcre`), ERA5 (`prw`), MODIS Aqua MYD08_M3 (`clt`/`clwvi`/`clivi`), EN4 (`tos`), IAP (OHC, from `thetao`, EN4 as second product) and HadISST (`siconc`, as **extent**) — plus OHC (total, 0–2000 m **and 0–100 m**), `reference_baseline` / `sst_baseline` (the reference's pre-test 1985–2014 record) and `eof_projection` / `sst_eof_projection` (the regime-(b) coefficients on the reference's fixed pre-2015 EOF basis). Every core variable carries the **staged CMIP6 comparison ensemble** in `other_data` |
 | `ClimateBench2_TierII_daily` | cubes (daily/hourly) | **full record** | **yes** | `extremes` — the eight ETCCDI indices (TXx, TNn, TX90p, WSDI; Rx1day, Rx5day, R95pTOT, CDD) as a climatological mean and a decadal trend per land band, on the ~1° conservative grid; `perkins` — the PDF-overlap skill of daily `tas` anomalies and wet-day `pr` intensity; `diurnal_harmonic` — first-harmonic amplitude and (cos, sin) phase of the sub-daily `pr` climatology in local solar time; plus the older deterministic displays (TXx block maxima, pr intensity histogram, `DiurnalCycle`) |
 | `ClimateBench2_TierII_events` | experiment dict (`historical`) | full | **yes** | The Tier II aggregated scalars of §II.1 — realized warming level (the protocol's primary test-window statistic) and the two GMST trends, the Pinatubo response, the aerosol-era hemispheric asymmetry, and the three **seasonal-cycle metrics** (land annual temperature range; SST–low-cloud covariance and the seasonal cloud-radiative feedback over the five stratocumulus decks). Reported and *scored*, never part of the Tier I entry ticket |
 | `ClimateBench2_TierIII` | experiment dict (`picontrol` + `midholocene`/`lgm`/`lig127k`) | full | no | The mid-Holocene Green-Sahara monsoon gate (with the Harrison 2015 North-Africa magnitude reported beside it) plus **one `PaleoProxyScore` stanza per (period, dataset, variable)** — LGM Tierney 2020 `tos`, Bartlein 2011 `tas`/`pr` and Cleator 2020 `tas`/`pr` (data assimilation: reported, not scored); mid-Holocene Bartlein 2011 `tas`/`pr` and Temp12k; LIG Otto-Bliesner 2021 `tas` and Scussolini 2019 `pr`. Each reads one processed NetCDF from `paleo_scripts/process_paleo_observations.py` (`--paleo-data-root DIR`, default `tier3.paleo_data_root`), scores the model's **block pseudo-ensemble** against it with fair CRPS and reports the site-consistency fraction |
@@ -70,7 +70,10 @@ clipped to the staged record per product, which is why I.3c pairs its model and
 reference fields on **calendar months** (`align_on_common_months`): GPCP starts
 in 1983 and ERA5 in 1979, and cutting both to the shorter length from the start
 regressed 1983–2014 precipitation on 1979–2010 buoyancy — a four-year offset
-that produced a *negative* observed precipitation–buoyancy slope.
+that produced a *negative* observed precipitation–buoyancy slope. I.3c's window
+(1983–2014, paper App. B.3) also bounds the **model**: its fields are cut to it
+and then to the months the six model and reference fields share, so both slopes
+are regressed over one month set.
 
 Two Tier II entries deliberately reach **back past the suite's test-window cut**,
 by loading their reference through a copy of the `Variable` carrying a different
@@ -197,8 +200,9 @@ The reference is **HadISST**, which is what is staged in ClimateEval form
 2015–2021). The protocol names OSI-450 / NSIDC-G02202; neither is staged, and a
 reference that does not resolve leaves every sea-ice row unscored, so the swap
 back is a one-line change once they are. The same reasoning put **EN4** behind
-`tos` in place of ESACCI-SST and **MERRA2** behind `ts` in place of ERA5; each
-swap is commented in the suite with the protocol's own choice.
+`tos` in place of ESACCI-SST, commented in the suite with the protocol's own
+choice. (Skin temperature `ts`, once scored against MERRA-2 as an ERA5
+stand-in, is no longer a Tier II variable: Duncan dropped it on 2026-10-27.)
 
 ## The perfect-model variant (Tier III.2)
 
