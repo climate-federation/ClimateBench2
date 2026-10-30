@@ -1088,7 +1088,10 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
      over 20S–20N and the months used) on the model side;
   3. minus every level **outside the reference's pressure range**, and every level the
      reference has no data on (the reference is snapped onto the submission's values
-     first; a level inside its range that ERA5 does not carry is interpolated);
+     first; a level inside its range that ERA5 does not carry is interpolated — with
+     the target levels requested in the data's own top-down order, because ESMValCore's
+     vertical interpolation returns NaN everywhere when the two orders disagree, which
+     emptied ICON-ESM-LR's reference until `96a9ac5`);
   and **both** columns are integrated over that identical set (≥ 2 levels). A level that
   is only partly missing (sub-surface 1000 hPa points) is kept; those columns drop out
   of the pooled regression as before. `precip_buoyancy_levels_dropped` (a count),
