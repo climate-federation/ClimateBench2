@@ -52,6 +52,7 @@ from climateeval.data import GPCP, ERA5Monthly, HadISST
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    import pandas as pd
     from iris.cube import Cube, CubeList
     from xarray import Dataset
 
@@ -587,6 +588,27 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
 # ---------------------------------------------------------------------------
 
 
+#: ``reference_source`` of an I.3c gate row: the GPCP/ERA5 slope computed at
+#: run time on the submission's own levels (the primary path, paper App. B.3)
+#: or the stored ``tier1.precip_buoyancy.reference_slope`` fallback.
+REFERENCE_FROM_OBSERVATIONS = "observations"
+REFERENCE_STORED_FALLBACK = "stored-fallback"
+
+
+def _precip_buoyancy_reference_source(raw: pd.DataFrame) -> dict[str, str]:
+    """The I.3c gate row's ``reference_source`` (see :class:`PrecipBuoyancyGate`)."""
+    flags = raw.get("precip_buoyancy_reference_from_obs")
+    flag = flags.dropna() if flags is not None else None
+    if flag is None or flag.empty:
+        return {}
+    source = (
+        REFERENCE_FROM_OBSERVATIONS
+        if float(flag.iloc[0]) == 1.0
+        else REFERENCE_STORED_FALLBACK
+    )
+    return {"reference_source": source}
+
+
 class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     """I.3c: tropical P′-on-column-MSE′ slope within ±30% of GPCP/ERA5.
 
@@ -627,12 +649,16 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     from the model and the reference rather than present on one side only.
 
     The reference slope is the same statistic from GPCP ``pr`` and ERA5
-    ``ta``/``hus``, computed at run time when those data are obtainable and
-    otherwise read from ``tier1.precip_buoyancy.reference_slope`` (null by
-    design). With neither available the model slope is emitted alone and no
-    gate row is written. The reference column is integrated over the
-    **submission's own** pressure levels, not ERA5's (paper App. B.3), and
-    ``precip_buoyancy_n_levels`` is reported alongside the slope.
+    ``ta``/``hus``, computed at run time when those data are obtainable (the
+    primary path) and otherwise read from the documented FALLBACK
+    ``tier1.precip_buoyancy.reference_slope`` (0.1166, ratified 2026-10-30:
+    the staged ERA5 on ``plev19``). With neither available the model slope
+    is emitted alone and no gate row is written. The gate row's
+    ``reference_source`` column says which one the bound was taken against
+    (``observations`` / ``stored-fallback``). The reference column is
+    integrated over the **submission's own** pressure levels, not ERA5's
+    (paper App. B.3), and ``precip_buoyancy_n_levels`` is reported alongside
+    the slope.
 
     **Each level is weighted by its own pressure** (fixed 2026-10-27).
     ``extract_levels`` keeps a file's level order when the requested levels
@@ -664,6 +690,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
             upper=get_threshold("tier1.precip_buoyancy.rel_tolerance_vs_obs"),
             requirement=gate_requirement("tier1.precip_buoyancy"),
             tier=gate_tier("tier1.precip_buoyancy"),
+            annotate=_precip_buoyancy_reference_source,
         ),
     )
 
@@ -1010,6 +1037,12 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
                 f"without a gate row",
             )
             return None, False, model, levels, {}
+        logger.warning(
+            f"Diagnostic '{self.name}': I.3c gated against the stored FALLBACK "
+            f"reference slope {float(stored)} (tier1.precip_buoyancy."
+            f"reference_slope), not the run-time GPCP/ERA5 slope; the gate "
+            f"row says reference_source = {REFERENCE_STORED_FALLBACK}",
+        )
         return float(stored), False, model, levels, {}
 
     def _calculate_raw_output(

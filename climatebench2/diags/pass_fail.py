@@ -136,6 +136,12 @@ class GateCheck:
     :func:`gate_requirement`; ``tier`` (:data:`TIER_TAGS`) is the protocol
     tier it belongs to and comes from :func:`gate_tier`. Both are carried on
     every gate row, and the leaderboard groups the scorecard by the pair.
+
+    ``annotate`` adds descriptive columns to the gate row: it receives the
+    data source's raw-output rows and returns ``{column: str}`` — e.g. I.3c's
+    ``reference_source``, which says whether the bound was taken against the
+    run-time observations or the stored fallback. Annotation columns are
+    strings, never part of the verdict.
     """
 
     check_id: str
@@ -145,6 +151,7 @@ class GateCheck:
     upper: float | None = None
     requirement: str = DEFAULT_REQUIREMENT
     tier: str = DEFAULT_TIER
+    annotate: Callable[[pd.DataFrame], dict[str, str]] | None = None
 
 
 def _gate_row(check: GateCheck, **fields: Any) -> dict[str, Any]:
@@ -195,6 +202,7 @@ def gate_metrics(
                         passes=float(passes),
                         applicable=1.0,
                     ),
+                    **(check.annotate(group) if check.annotate else {}),
                 },
             )
     return pd.DataFrame(rows)
@@ -236,13 +244,22 @@ def _with_gate_rows(
     raw_output: Any = None,
 ) -> DiagnosticOutput:
     """Merge gate rows into a diagnostic output's ``metrics`` table."""
+    # The gate rows' string columns: `requirement`, `tier` and any
+    # `GateCheck.annotate` column (identity columns aside).
+    string_columns = [
+        c
+        for c in gates_df.columns
+        if not pd.api.types.is_numeric_dtype(gates_df[c])
+        and c not in ("data_id", "data_type", "var_id")
+    ]
     if output.metrics is not None:
         existing = output.metrics.to_pandas()
         gates_df = pd.concat([existing, gates_df], ignore_index=True, sort=False)
-        # Keep `requirement`/`tier` string columns: rows from non-gate metrics
-        # have no tag, and a NaN there would make ibis infer a numeric column.
-        for column in ("requirement", "tier"):
-            gates_df[column] = gates_df[column].fillna("")
+    # Keep them string columns: rows from non-gate metrics (or from a check
+    # without that annotation) have no value, and a NaN there would make ibis
+    # infer a numeric column.
+    for column in string_columns:
+        gates_df[column] = gates_df[column].fillna("")
     return DiagnosticOutput(
         raw_output=output.raw_output if raw_output is None else raw_output,
         metrics=ibis.memtable(gates_df),

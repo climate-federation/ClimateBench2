@@ -440,8 +440,49 @@ def test_precip_buoyancy_pairs_each_level_with_its_own_pressure() -> None:
     assert slope != pytest.approx(_expected_slope(), rel=0.05)
 
 
+def _stored_reference_slope(monkeypatch: pytest.MonkeyPatch, stored: float | None) -> None:
+    """Replace ``tier1.precip_buoyancy.reference_slope`` for one test."""
+    from climatebench2.diags import tier1_extended
+
+    real = tier1_extended.get_threshold
+
+    def thresholds(path: str):  # noqa: ANN202
+        if path == "tier1.precip_buoyancy.reference_slope":
+            return stored
+        return real(path)
+
+    monkeypatch.setattr(tier1_extended, "get_threshold", thresholds)
+
+
+def test_precip_buoyancy_stored_fallback_is_the_ratified_value() -> None:
+    """Decision E.4b (2026-10-30): the fallback is the staged ERA5/GPCP slope."""
+    assert get_threshold("tier1.precip_buoyancy.reference_slope") == 0.1166
+    assert get_threshold("tier1.precip_buoyancy.rel_tolerance_vs_obs") == 0.30
+
+
+def test_precip_buoyancy_gate_row_names_the_run_time_reference(monkeypatch) -> None:  # noqa: ANN001
+    """The primary path: the gate row says it was taken against observations."""
+    output = _run_precip_buoyancy(monkeypatch, _expected_slope() / 1.1)
+    metrics = output.metrics.to_pandas().set_index("var_id")
+    assert metrics.loc["precip_buoyancy", "reference_source"] == "observations"
+
+
+def test_precip_buoyancy_gate_row_names_the_stored_fallback(monkeypatch) -> None:  # noqa: ANN001
+    """No observations: gated against the packaged fallback, and the row says so."""
+    output = _run_precip_buoyancy(monkeypatch, None)
+    raw = _raw(output)
+    assert raw["precip_buoyancy_reference_from_obs"] == 0.0
+    assert raw["precip_buoyancy_slope_ref"] == pytest.approx(0.1166)
+    metrics = output.metrics.to_pandas().set_index("var_id")
+    assert metrics.loc["precip_buoyancy", "reference_source"] == "stored-fallback"
+    assert metrics.loc["precip_buoyancy", "value"] == pytest.approx(
+        abs(raw["precip_buoyancy_slope"] / 0.1166 - 1.0),
+    )
+
+
 def test_precip_buoyancy_without_a_reference_emits_the_model_slope(monkeypatch) -> None:  # noqa: ANN001
     """No observations and a null stored slope: report, do not gate."""
+    _stored_reference_slope(monkeypatch, None)
     output = _run_precip_buoyancy(monkeypatch, None)
     raw = _raw(output)
     assert raw["precip_buoyancy_slope"] == pytest.approx(_expected_slope(), rel=0.02)
@@ -570,17 +611,8 @@ def test_precip_buoyancy_uses_the_identical_month_set_on_both_sides(monkeypatch)
 
 def test_precip_buoyancy_keeps_the_window_with_the_stored_reference(monkeypatch) -> None:  # noqa: ANN001
     """No observations, a stored slope: the model is still cut to 1983–2014."""
-    from climatebench2.diags import tier1_extended
-
     stored = _expected_slope() / 1.1
-    real = tier1_extended.get_threshold
-
-    def thresholds(path: str):  # noqa: ANN202
-        if path == "tier1.precip_buoyancy.reference_slope":
-            return stored
-        return real(path)
-
-    monkeypatch.setattr(tier1_extended, "get_threshold", thresholds)
+    _stored_reference_slope(monkeypatch, stored)
     full = _buoyancy_cubes(
         start_year=1850,
         n_years=2100 - 1850 + 1,

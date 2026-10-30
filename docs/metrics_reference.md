@@ -250,7 +250,7 @@ them is stale by construction.
 
 ---
 
-# Decisions needed from Duncan (2026-09-14, updated 2026-09-21)
+# Decisions needed from Duncan (2026-09-14, updated 2026-09-21 and 2026-10-30)
 
 Every ⚠ and `TODO(Duncan)` the implementation raised, in one list. Nothing here blocks
 the code from running — each item is a **choice already made provisionally**, recorded
@@ -274,6 +274,28 @@ survives.
 - ~~`ts` is referenced against **MERRA-2** as a staged stand-in; ERA5 `ts` exists upstream
   (#48) but needs a CDS download.~~ **Superseded 2026-10-27 (Duncan):** `ts` is no longer a
   Tier II scored variable in the v2 protocol (B.26); model `ts` stays a Tier I input.
+
+**Ratified 2026-10-30 (Duncan), for the v2.0.0 release.** Marked **RATIFIED
+2026-10-30** in place below as well.
+- **I.3c tolerance: keep ±30 %** (E.4a). `tier1.precip_buoyancy.rel_tolerance_vs_obs`
+  stays 0.30; with the window, hydrostatic-z and level-order fixes 41/58 CMIP6 models
+  pass.
+- **I.3c stored reference slope: 0.1166 as a documented FALLBACK** (E.4b, C.2).
+  `tier1.precip_buoyancy.reference_slope: 0.1166` (staged ERA5 + GPCP v3.3, 20S–20N,
+  1983–2014, `plev19`) is used **only** when the run-time GPCP/ERA5 reference is
+  unavailable; the run-time reference on the submission's own levels stays the primary
+  path. Each I.3c gate row says which one it used in its `reference_source` column
+  (`observations` / `stored-fallback`).
+- **Comparison member cap: per model, before variable availability** (E.6). Unchanged:
+  a model's first ten `r*i1p1f*` realizations are fixed once; a variable some of them
+  lack is scored on fewer.
+- **OHC is a Tier II Extended entry in v2.** `tier2.variable_status` tags it (with
+  surface fluxes, `clt`/`clwvi`/`clivi` and `prw`) **extended**, per paper Table 2;
+  the leaderboard shows Extended entries apart from Core ones (§ Tier II scope).
+- **Data-layer models without Tier I rows are left as is.** A CMIP6 model in the
+  comparison data layer (the `E_ref` ensemble) that has no Tier I gate rows keeps its
+  place in the ensemble: comparison membership does not depend on Tier I, and no
+  model is added to or removed from the data layer for it.
 
 A new group **E** records the protocol questions the first real runs raised. Those are
 **not** decisions already taken in code — they are observations that the code is doing
@@ -550,8 +572,10 @@ implemented and unit-tested; none is claimed to be the paper's own words.
    solar) forcing omitted** — not the AR6 annual series. Its own header carries the
    anchors and the consequences. Needs the digitised AR6 Ch. 7 / Annex III series.
    → §II.0 baselines.
-2. ~~**`tier1.precip_buoyancy.reference_slope: null`** — pin it.~~ **WON'T FIX, and the
-   null is now deliberate (2026-09-20, `52d2e50`).** ⚠ **Reopened 2026-10-27:** the
+2. ~~**`tier1.precip_buoyancy.reference_slope: null`** — pin it.~~ **RATIFIED 2026-10-30
+   (Duncan): pinned to 0.1166 as a documented FALLBACK** (used only without the
+   run-time reference; the gate row's `reference_source` says which was used — E.4b).
+   *History:* **WON'T FIX, and the null deliberate (2026-09-20, `52d2e50`).** **Reopened 2026-10-27:** the
    level-set dependence below was a level-ordering bug in the column integral; with it
    fixed the staged ERA5 gives 0.1162 on 37 levels and 0.1166 on `plev19`, so a stored
    constant is defensible again — see E.4. The original reasoning: The reference column must be
@@ -593,7 +617,7 @@ implemented and unit-tested; none is claimed to be the paper's own words.
    level set, were fixed in CB2's copies *after* the PRs were opened. Retiring the CB2
    copies against the PRs as they stand would regress all four.
 
-### E. Protocol observations from the first real runs (2026-09-20) — Duncan to rule (6)
+### E. Protocol observations from the first real runs (2026-09-20) — Duncan to rule (6; all ruled by 2026-10-30 except E.5)
 
 **These are not code changes and none has been made.** In each case the code implements
 the paper's own definition and the paper's own bound, and the first real model says the
@@ -643,6 +667,12 @@ bound is unreachable or the definition is ambiguous. They are recorded here rath
    the CMIP6 ensemble will show; (b) whether to pin `tier1.precip_buoyancy.
    reference_slope`, since the observed slope no longer depends on the level set
    (≈ 0.116 mm day⁻¹ per MJ m⁻² on `plev19` and on ERA5's 37 levels). → I.3c.
+
+   **RATIFIED 2026-10-30 (Duncan).** (a) **Keep ±30 %.** (b) **Pin
+   `reference_slope: 0.1166` as a documented FALLBACK**, used only when the run-time
+   GPCP/ERA5 reference is unavailable; the run-time reference on the submission's own
+   levels stays the primary path, and each gate row's `reference_source` column says
+   which one was used (`observations` / `stored-fallback`).
 5. **I.8b's ITCZ latitude is quantised to the 2° grid; a centroid definition tightens it
    further but is not decisive.** With the `itcz_lag_months` fix in place, the argmax
    ITCZ latitude already clears both I.8b bounds on CNRM-CM6-1 and MPI-ESM1-2-LR. A
@@ -667,6 +697,9 @@ bound is unreachable or the definition is ambiguous. They are recorded here rath
    restaged and the frozen comparison bundle rebuilt. → §II.0,
    `climatebench2/data/cmip6_staged.py`.
 
+   **RATIFIED 2026-10-30 (Duncan): keep the per-model cap**, applied before variable
+   availability. No restaging, no bundle change.
+
 ---
 
 # Tier I — Physical consistency (entry ticket, pass/fail)
@@ -682,7 +715,7 @@ Every check is binary pass/fail. A model must pass Tier I to be scored in Tier I
 | I.2b | Atmospheric energy budget | \|⟨Q_rad⟩ − (⟨L·P⟩+⟨SHF⟩)\| < 2 W/m² | Req. | ✅ the paper's arrangement, `Q_rad = sfc_net_rad − TOA_net`; an Earth-like column (LP ≈ 80, SHF ≈ 20, Q_rad ≈ 100 W/m²) now closes to ≈ 0 | `ClosureGate`, `physics.atmospheric_energy_residual` |
 | I.3a | Clear-sky LW feedback β = ∂rlutcs/∂Ts | global-mean **forced** slope (abrupt-4xCO2 vs piControl) within ±25% of 1.9 W/m²/K — **RATIFIED 2026-09-21** | Req. | ✅ OLS slope of annual global-mean `rlutcs` on `ts` anomalies (baseline = piControl long-term mean, `physics.gregory_regression`), ±25% of 1.9. Closes decision E.1: on CNRM-CM6-1 the forced-response slope was already measured at **1.75**, inside the new window (the superseded interannual `historical` gridpoint statistic gave 0.71, outside the old [1.65, 2.75]) | `ClearSkyFeedbackGate`, `physics.gregory_regression` |
 | I.3b | Midlatitude geostrophic balance | spatial ρ(u, u_g) at 850 hPa daily, 30–60°, > 0.9. **Skipped (N/A) for models with no dynamical representation** | Req. (N/A allowed) | ✅ per spec (daily `ua`/`zg` at 850 hPa, optional `ps` orography mask, pooled 30–60° both hemispheres); N/A **declarable** (`score --not-applicable geostrophic_balance` → `applicable = 0`). **Run on real data (CNRM-CM6-1): ρ = 0.985** (NH 0.976, SH 0.990), after two fixes the synthetic fixtures could not have caught — `ua`/`zg`/`ps` are paired on **calendar days** rather than by position (`3c5c47c`) and the masked 850 hPa field is read with `_filled` rather than `np.asarray` (`74e0f7c`; without it the file's 1e20 under sub-surface points gave ρ = 0.088) | `diags.tier1_extended.GeostrophicBalanceGate`, `align_on_common_days` |
-| I.3c | Tropical precipitation–buoyancy | monthly P′ vs column-MSE′ slope, 20S–20N, ±30% of GPCP/ERA5 | Req. | ✅ ∫(c_p·ta + g·z + L_v·hus) dp/g with z hydrostatic from each side's own ta/hus (model `zg` not read), over **1983–2014 on the identical month set** for model and reference, monthly anomalies over 20S–20N, pooled slope, gated at ±30% of the run-time GPCP/ERA5 slope. Earlier real-data fixes: the model and reference fields are paired on **calendar months** (`77a9301` — GPCP starts 1983 and ERA5 1979, and the old positional cut regressed GPCP 1983–2014 on ERA5 1979–2010, giving an unphysical *negative* reference slope), and the reference column is integrated over the **model's own level set** (`52d2e50`), emitted as **`precip_buoyancy_n_levels`**. The stored `reference_slope` stays null (decision C.2, reopened in E.4). 2026-10-27: a level-ordering bug in the column integral fixed; CNRM-CM6-1 now reads \|model/ref − 1\| = 0.017 (pass; 0.319 at v1.0.0) | `diags.tier1_extended.PrecipBuoyancyGate`, `align_on_common_months`, `physics.moist_static_energy` / `mass_weighted_column_integral` / `pooled_regression_slope` |
+| I.3c | Tropical precipitation–buoyancy | monthly P′ vs column-MSE′ slope, 20S–20N, ±30% of GPCP/ERA5 | Req. | ✅ ∫(c_p·ta + g·z + L_v·hus) dp/g with z hydrostatic from each side's own ta/hus (model `zg` not read), over **1983–2014 on the identical month set** for model and reference, monthly anomalies over 20S–20N, pooled slope, gated at ±30% of the run-time GPCP/ERA5 slope. Earlier real-data fixes: the model and reference fields are paired on **calendar months** (`77a9301` — GPCP starts 1983 and ERA5 1979, and the old positional cut regressed GPCP 1983–2014 on ERA5 1979–2010, giving an unphysical *negative* reference slope), and the reference column is integrated over the **model's own level set** (`52d2e50`), emitted as **`precip_buoyancy_n_levels`**. The stored `reference_slope` is a documented fallback, 0.1166, used only without the run-time reference; the gate row's `reference_source` says which was used (decision E.4b, ratified 2026-10-30). 2026-10-27: a level-ordering bug in the column integral fixed; CNRM-CM6-1 now reads \|model/ref − 1\| = 0.017 (pass; 0.319 at v1.0.0) | `diags.tier1_extended.PrecipBuoyancyGate`, `align_on_common_months`, `physics.moist_static_energy` / `mass_weighted_column_integral` / `pooled_regression_slope` |
 | I.4a | GFMIP SST patch experiments | Δλ = ΔR_EP/ΔTs_EP − ΔR_WP/ΔTs_WP > 0.5 W/m²/K — **Extended** | Ext. | ✅ per spec; needs submission-provided `amip`/`patch_ep`/`patch_wp`; tagged `requirement: extended`, so it is reported for credit but outside the entry ticket | `GFMIPPatchGate` |
 | I.4b | amip-4xCO2 ERF | 6.5–9.0 W/m² | Req. | ✅ (TOA-net difference amip-4xCO2 − amip; no land-warming correction, none asked) | `Amip4xCO2ERFGate` |
 | I.5a | ENSO amplitude | σ(Niño-3.4) ∈ [0.5, 1.4] K | Req. | ✅ σ of the **unsmoothed** deseasonalised monthly index (`ENSOGate._rolling_window_length = 1`), computed on the **piControl experiment in full** (confirmed 2026-09-14: `_cli.SUITE_REGISTRY` gives `ClimateBench2_TierI_variability` `source="picontrol"`, `window="full"`; the CLI warns loudly and falls back to the submission's own output if none is given). The CB2 `_preprocess` copy of the whole Niño-3.4 chain is **gone** (`224a133`, PR #46 merged): setting `_rolling_window_length = 1` is now the entire override | `diags.pass_fail.ENSOGate` |
@@ -1120,12 +1153,17 @@ computed from ERA5 on the **submission's own pressure-level set** (App. B.3).
   `precip_buoyancy_top_level_pa` and `precip_buoyancy_bottom_level_pa` are emitted and
   the dropped levels are logged with their reasons. With the stored-slope fallback only
   steps 1–2 apply.
-- ✅ **The stored `reference_slope` stays null.** It was left null because a constant
-  seemed to be correct for one level set only (decision C.2); with the level-order bug
-  fixed that reason is gone (0.1162 on 37 levels, 0.1166 on `plev19`), so pinning one
-  is open again (decision E.4). The run-time reference on the submission's levels stays
-  the primary path. With neither a run-time nor a stored reference the model slope is
-  emitted and **no gate row** is written.
+- ✅ **Stored FALLBACK `reference_slope: 0.1166`** (RATIFIED 2026-10-30, Duncan —
+  decision E.4b). It was null from 2026-09-20 because a constant seemed to be correct
+  for one level set only (decision C.2); with the level-order bug fixed that reason is
+  gone (0.1162 on ERA5's 37 levels, 0.1166 on `plev19`). The run-time GPCP/ERA5
+  reference on the **submission's own levels stays the primary path**; the stored
+  value is used **only** when that reference cannot be computed (no staged
+  observations, no network). Every I.3c gate row carries a **`reference_source`**
+  column — `observations` or `stored-fallback` — so a verdict taken against the
+  fallback is visible as such, and the fallback is logged. With neither a run-time
+  nor a stored reference (`reference_slope: null`) the model slope is emitted and
+  **no gate row** is written.
 - ✅ **The same column statistic on both sides: hydrostatic geopotential for model and
   reference** (Duncan, 2026-10-27). ERA5 `zg` exists upstream (PR #48, merged) but is
   not staged, so the reference column has always used the hydrostatic geopotential of

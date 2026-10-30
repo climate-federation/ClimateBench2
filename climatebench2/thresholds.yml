@@ -84,6 +84,9 @@ tier1:
   precip_buoyancy:
     tier: I
     requirement: required
+    # ±30 % kept (RATIFIED 2026-10-30, Duncan; decision E.4a): with the
+    # window, hydrostatic-z and level-order fixes the statistic is well
+    # determined and 41/58 CMIP6 models pass at this width.
     rel_tolerance_vs_obs: 0.30         # slope within ±30% of GPCP/ERA5
     # The ONE window of I.3c (paper Table 1 and App. B.3: "over 1983-2014, the
     # period of the GPCP/ERA5 reference"): the reference slope AND the model
@@ -95,21 +98,22 @@ tier1:
     # whole record. Never post-2015, which is the reserved test window.
     obs_window: [1983, 2014]
     # Reference slope of P' (mm/day) on column-MSE' (MJ m-2) from GPCP + ERA5
-    # over `obs_window`. `PrecipBuoyancyGate` computes it at run time when the
-    # observations are obtainable; this key is the stored fallback so a run
-    # without network access still gates.
+    # over `obs_window`.
     #
-    # null (2026-09-20). It was left null because the observed slope looked
-    # like a strong function of the level set (0.14637 mm/day per MJ/m2 on
-    # ERA5's 37 levels, 0.03403 on CMIP6 plev19), so no constant could be
-    # model-independent. That dependence was a level-ordering bug in the
-    # column integral (fixed 2026-10-27): with it fixed the same staged ERA5
-    # over 20S-20N, 1983-2014 gives 0.1162 on 37 levels and 0.1166 on plev19
-    # (r = 0.48). Whether to pin a stored value now is open for Duncan
-    # (decision E.4 in docs/metrics_reference.md); the run-time reference on
-    # the submission's own levels (paper App. B.3) stays the primary path,
-    # and the gate emits `precip_buoyancy_n_levels`.
-    reference_slope: null
+    # PRIMARY PATH: `PrecipBuoyancyGate` computes the reference at run time
+    # from GPCP/ERA5 on the SUBMISSION'S OWN pressure levels (paper App. B.3).
+    #
+    # FALLBACK (RATIFIED 2026-10-30, Duncan; decision E.4b): this stored value
+    # is used ONLY when the run-time GPCP/ERA5 reference is unavailable (no
+    # staged observations, no network). It is the staged ERA5 + GPCP v3.3
+    # slope over 20S-20N, 1983-2014, on CMIP6 plev19 (0.1162 on ERA5's 37
+    # levels: the level-set dependence once seen here was a level-ordering
+    # bug in the column integral, fixed 2026-10-27). Every I.3c gate row
+    # carries `reference_source` = `observations` | `stored-fallback`, so a
+    # verdict against the fallback is never mistaken for the primary one.
+    # (Null from 2026-09-20 to 2026-10-30, while the slope looked level-set
+    # dependent.)
+    reference_slope: 0.1166
 
   # I.4a GFMIP SST patch experiments
   gfmip_patch:
@@ -242,7 +246,8 @@ tier2:
   # number or `*`), ordered by realization number, the first
   # `max_members_per_model` per model. The cap is taken per MODEL before any
   # variable is looked at, so a variable some of those members lack is scored
-  # on fewer of them, never on later members that happen to carry it.
+  # on fewer of them, never on later members that happen to carry it
+  # (per-model cap RATIFIED 2026-10-30, Duncan; decision E.6).
   comparison_ensemble:
     member_pattern: "r*i1p1f*"
     max_members_per_model: 10
