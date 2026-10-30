@@ -1,5 +1,7 @@
 # ClimateBench2
 
+Version 2.0.0 ([CHANGELOG.md](CHANGELOG.md)).
+
 ClimateBench v2 is a protocol for scoring and testing climate models and
 emulators. A submission is evaluated in three tiers:
 
@@ -16,7 +18,9 @@ emulators. A submission is evaluated in three tiers:
   the reserved post-2015 test window are labelled *held-out*; those scored
   over the historical record are labelled *in-sample*. Climatology and
   pattern-scaling baselines are reported alongside. Fair CRPS needs at least
-  two members, so a single-member submission is reported as `n/a`.
+  two members, so a single-member submission is reported as `n/a`. Entries
+  are **Core** or **Extended** as in the paper's Table 2 (OHC, surface
+  fluxes, cloud properties and water vapour path are Extended).
 - **Tier III: out-of-sample tests.** Paleoclimate time slices (LGM,
   mid-Holocene, Last Interglacial) scored with fair CRPS against proxy
   compilations, and perfect-model tests that score the submission against a
@@ -44,8 +48,8 @@ pixi run pip install -e /path/to/ClimateBench2 --no-deps
 ```
 
 A plain `pip install .` instead pulls the ClimateEval commit pinned in
-`pyproject.toml`. Some suite entries use ClimateEval diagnostics from pull
-requests not yet merged upstream, which that commit does not provide.
+`pyproject.toml` (`d2559b2`, ClimateEval main with every upstream pull request
+the suites need), so no local ClimateEval checkout is required.
 
 ## Usage
 
@@ -150,6 +154,11 @@ default with `frozen`/`none`) logs a crashing gate as `CB2_GATE_CRASH` and
 carries on. Variables in `tier2.frozen_comparison.exclude_variables` (`ts`)
 are left out of a bundle unless `--include-variable` keeps them.
 `merge-comparison DIR DB...` merges a bundle into existing databases.
+
+The v2 reference bundle is at `gs://climatebench/v2/references/` (public-read),
+and the v2 frozen comparison bundle at `gs://climatebench/v2/comparison/`.
+[deploy/](deploy/README.md) packages a frozen run as a container that scores
+one submission per Kubernetes Job.
 
 ## Thresholds and specification
 

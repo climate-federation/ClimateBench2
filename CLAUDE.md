@@ -28,11 +28,10 @@ standalone paper studies, not protocol code; the package never imports it.
 ## The ClimateEval dependency
 
 ClimateEval is third-party, pre-1.0 and not on PyPI; it is **pinned by commit** in
-`pyproject.toml`. **Never vendor or patch it**: contribute upstream or keep the code
-here. Some suite entries (e.g. the Tier II sea-ice extent diagnostics) need ClimateEval
-diagnostics from pull requests not yet merged upstream, which the pinned commit lacks,
-so development uses a local ClimateEval checkout carrying them:
-`pip install -e ../ClimateEval && pip install -e . --no-deps`.
+`pyproject.toml` (`d2559b2`, which has every upstream PR the suites need; keep
+`deploy/Dockerfile`'s `CLIMATEEVAL_REF` equal to it). **Never vendor or patch it**:
+contribute upstream or keep the code here. Development uses ClimateEval's pixi
+environment: `pip install -e ../ClimateEval && pip install -e . --no-deps`.
 
 ## The package: `climatebench2/`
 
@@ -85,7 +84,9 @@ climatebench2/
   (`diags/tier2_daily.py`). A skill score that is not an error (the Perkins PDF
   overlap) is written as a metric and never enters `E_ref`.
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
-  `perfect-model`) from `tier2.window_labels`; `perfect-model` whenever the reference's
+  `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
+  `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so
+  it stays out of `PROTOCOL_THRESHOLDS`; `perfect-model` whenever the reference's
   `data_sources.category` is `truth`. The Tier II pass deletes and rewrites only its own
   `scorer = climatebench2` rows; Tier III paleo rows (`scorer = climatebench2.tier3`)
   are written by the diagnostic and survive `--rescore`.
@@ -124,7 +125,9 @@ climatebench2 score MODEL --no-cache     # re-load reference + ensemble for ever
 climatebench2 freeze-comparison run/*.ddb -o BUNDLE --timerange 20150101/20251231
 #   copy the CMIP6 comparison rows (data_type 'other', non-observational) of live
 #   runs into a bundle (.ddb per suite + manifest.json); --extend adds a variable
-#   group, --replace re-freezes one; tier2.frozen_comparison.exclude_variables (ts)
+#   group, --replace re-freezes one; tier2.frozen_comparison.exclude_variables (ts).
+#   A bundle records climatebench2.__version__ and the CLI refuses another version:
+#   bumping the version means re-freezing the bundle.
 climatebench2 score MODEL --comparison frozen --frozen-comparison BUNDLE
 #   strip the ensemble generators from other_data, Tier I wrappers skip theirs,
 #   merge BUNDLE before the pass (keys: suite stem, schema, variable); refuses a

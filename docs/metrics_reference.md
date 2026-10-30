@@ -1761,7 +1761,11 @@ extra group and excluded from the entry ticket.
 **Scope (paper).** Score model *ensembles* against observations over 2015–present.
 Core variables: `tas` (incl. **daily extremes**), `pr` (incl. **intensity PDF**),
 TOA fluxes, **sea ice** (`ts`, skin temperature, was dropped from the v2 protocol on
-2026-10-27 — decision B.26). Extended: OHC, surface fluxes, cloud properties, `prw`.
+2026-10-27 — decision B.26). Extended: OHC (ratified Extended 2026-10-30), surface
+fluxes, cloud properties, `prw`. The split is `tier2.variable_status` (keyed like
+`tier2.window_labels`: `var_id`, then suite entry, then `default: core`); every scored
+row carries it as `variable_status` and the leaderboard puts the Extended entries in a
+table of their own. It is presentation only and outside the frozen-bundle fingerprint.
 **Baselines (RESTRUCTURED 2026-09).** There is now **one headline skill score per
 scorecard entry**, taken relative to the **CMIP6 multi-model ensemble**. Two further
 references are computed and reported *alongside* it as diagnostic context, not as

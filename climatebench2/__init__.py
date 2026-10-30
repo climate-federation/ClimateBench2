@@ -12,4 +12,4 @@ See ``docs/climateeval_delineation_plan.md`` for the ownership boundary and
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
