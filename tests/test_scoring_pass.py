@@ -1481,3 +1481,122 @@ def test_a_float32_raw_output_column_is_anomalised(tmp_path) -> None:  # noqa: A
     assert submission["reason"] == ""
     assert submission["crps"] < 0.1
     assert submission["n_time"] == len(TEST_YEARS)
+
+
+# ---------------------------------------------------------------------------
+# A wide (several-variable) table scores exactly like one table per variable
+# ---------------------------------------------------------------------------
+
+#: ``(name, category, data_type, {variable: [variants carrying it]})``. The
+#: CMIP6 models are staged for `tas` with more members than for `rlut`, as in
+#: the real comparison ensemble (CESM2: 6 `tas` members, 1 `rlut`).
+_WIDE_SOURCES = [
+    ("MyModel", "model", "to_benchmark", {"tas": [1, 2, 3], "rlut": [1, 2, 3]}),
+    ("CMIP6_A", "CMIP6", "other", {"tas": [1, 2], "rlut": [1, 2]}),
+    ("CMIP6_B", "CMIP6", "other", {"tas": [1, 2, 3, 4], "rlut": [1, 3]}),
+    ("CMIP6_C", "CMIP6", "other", {"tas": [1, 2, 3], "rlut": [2]}),
+    ("CMIP6_D", "CMIP6", "other", {"tas": [1, 2]}),
+    ("ERA5", "reanalysis", "other", {"tas": [0]}),
+]
+
+#: Each variable's reference and the first year every source of it is loaded
+#: from: `reference_windows` clips a regime-(a) entry to the reference's own
+#: record, so `rlut` (CERES-EBAF, from 2001) has a 2001-2014 baseline while
+#: `tas` (HadCRUT5) has the full 1985-2014 one.
+_WIDE_REFERENCES = {"tas": ("HadCRUT5", 1985), "rlut": ("CERES-EBAF", 2001)}
+
+
+def _one_variable_table(
+    variable: str,
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """``(raw_output, data_sources)`` of a split, one-variable suite run."""
+    reference, first = _WIDE_REFERENCES[variable]
+    years = [y for y in ALL_YEARS if y >= first]
+    times = _times(years)
+    level = 288.0 if variable == "tas" else 240.0
+    truth = level + _truth(years, rng)
+    frames = [
+        pd.DataFrame(
+            {
+                "data_id": f"observation_{reference}",
+                "data_type": "reference",
+                "time": times,
+                variable: truth,
+            },
+        ),
+    ]
+    sources = [
+        {
+            "id": f"observation_{reference}",
+            "name": reference,
+            "category": "observation",
+        },
+    ]
+    for name, category, data_type, carried in _WIDE_SOURCES:
+        for variant in carried.get(variable, []):
+            exp = "" if category == "reanalysis" else "historical"
+            label = f"r{variant}i1p1f1" if variant else ""
+            data_id = _source_id(category, name, exp, label)
+            # Each member has its own mean-state bias, which the anomaly removes
+            bias = rng.normal(0.0, 2.0)
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "data_id": data_id,
+                        "data_type": data_type,
+                        "time": times,
+                        variable: truth + bias + rng.normal(0.0, 0.2, len(years)),
+                    },
+                ),
+            )
+            sources.append({"id": data_id, "name": name, "category": category})
+    return pd.concat(frames, ignore_index=True), pd.DataFrame(sources)
+
+
+def _comparable(rows: list[dict]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    keys = ["var_id", "data_type", "data_id"]
+    return frame.sort_values(keys).reset_index(drop=True)[sorted(frame.columns)]
+
+
+def test_a_wide_table_scores_like_one_table_per_variable() -> None:
+    """The full default suite writes ONE `annual_mean_timeseries` raw_output.
+
+    The paper's runs were split, one variable group per suite. A comparison
+    member that carries `tas` but not `rlut` sits in the wide table with NULL
+    `rlut`, and stacking it with its siblings emptied the inner join: its
+    whole model vanished from `rlut`'s E_ref (the first full-suite cloud run,
+    2026-10-30: 3 CMIP6 models fewer for rlut, E_ref 0.321 vs 0.307). The
+    per-variable anomaly window (2001-2014 for a reference that starts in
+    2001) must also survive the merge.
+    """
+    rng = np.random.default_rng(200)
+    tas_raw, tas_sources = _one_variable_table("tas", rng)
+    rlut_raw, rlut_sources = _one_variable_table("rlut", rng)
+    keys = ["data_id", "data_type", "time"]
+    wide = tas_raw.merge(rlut_raw, on=keys, how="outer")
+    sources = pd.concat([tas_sources, rlut_sources]).drop_duplicates("id")
+
+    split = _comparable(
+        score_raw_output(tas_raw, tas_sources, settings=FAST, diagnostic=DIAGNOSTIC)
+        + score_raw_output(
+            rlut_raw,
+            rlut_sources,
+            settings=FAST,
+            diagnostic=DIAGNOSTIC,
+        ),
+    )
+    full = _comparable(
+        score_raw_output(wide, sources, settings=FAST, diagnostic=DIAGNOSTIC),
+    )
+    pd.testing.assert_frame_equal(full, split)
+
+    # ... and the case that broke is really exercised: CMIP6_B is scored for
+    # rlut from its two rlut members, not dropped for its four tas ones.
+    b = full[(full["data_id"] == "CMIP6_B") & (full["var_id"] == "rlut")].iloc[0]
+    assert b["n_members"] == len(_WIDE_SOURCES[2][3]["rlut"])
+    assert np.isfinite(b["crps"])
+    # A model / product without any rlut member gets no rlut row at all
+    no_rlut = full["data_id"].isin(["CMIP6_D", "ERA5"])
+    assert not (full["var_id"].eq("rlut") & no_rlut).any()

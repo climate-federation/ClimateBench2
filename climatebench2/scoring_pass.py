@@ -453,6 +453,42 @@ def is_truth(
     return any(categories.get(i, "") == TRUTH_CATEGORY for i in data_ids)
 
 
+def variable_carriers(
+    raw_df: pd.DataFrame,
+    var_columns: list[str],
+) -> dict[str, frozenset[str]]:
+    """``variable -> {data_id}`` of the sources that carry it at all.
+
+    One ``raw_output`` can hold several variables: the full default Tier II
+    suite writes every variable of ``annual_mean_timeseries`` into one wide
+    table, and each source has NULLs in the columns it does not provide (a
+    comparison member staged for ``tas`` but not ``rlut``, an observational
+    product of another variable). Per variable, the ensemble is the sources
+    that carry it — exactly the sources a one-variable (split-suite) table
+    would hold. Read from the table *as stored*, before anomalisation blanks
+    the members without a baseline window, so those still get their reason.
+    """
+    carriers: dict[str, frozenset[str]] = {}
+    for column in var_columns:
+        if column not in raw_df.columns:
+            continue
+        finite = pd.to_numeric(raw_df[column], errors="coerce").notna()
+        carriers[column] = frozenset(raw_df.loc[finite, "data_id"].astype(str))
+    return carriers
+
+
+def carrying(
+    frames: list[pd.DataFrame],
+    carriers: dict[str, frozenset[str]] | None,
+    column: str,
+) -> list[pd.DataFrame]:
+    """Keep the member frames whose source carries ``column`` (all if unknown)."""
+    if carriers is None:
+        return frames
+    ids = carriers.get(column, frozenset())
+    return [f for f in frames if str(f["data_id"].iloc[0]) in ids]
+
+
 def stack_members(
     members: list[pd.DataFrame],
     reference: pd.DataFrame,
@@ -1526,6 +1562,7 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
     if raw_df.empty or not var_columns:
         return []
 
+    carriers = variable_carriers(raw_df, var_columns)
     anomalies = windows.scores_anomalies(diagnostic)
     no_baseline: set[tuple[str, str]] = set()
     unscorable: list[str] = []
@@ -1581,8 +1618,15 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
 
         scored: dict[tuple[str, str], dict[str, Any]] = {}
         consistency: list[dict[str, Any]] = []
-        for key, member_frames in groups.items():
+        for key, frames in groups.items():
             data_type, name = key
+            # Only the sources that carry this variable are its ensemble: a
+            # member of a wide table without it would empty the inner join
+            # of `stack_members` and silently drop its whole model from
+            # E_ref (variable_carriers).
+            member_frames = carrying(frames, carriers, column)
+            if not member_frames:
+                continue
             if observational[key]:
                 scored[key] = _empty_row(
                     name,
@@ -1613,7 +1657,7 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
                 if not usable:
                     scored[key] = _empty_row(name, data_type, column, NO_BASELINE_REASON)
                     continue
-                member_frames = usable  # noqa: PLW2901
+                member_frames = usable
             members, obs, times = stack_members(member_frames, reference, column)
             if obs.size < _MIN_OVERLAP:
                 continue
@@ -1674,7 +1718,7 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
         _apply_reference_skill(scored)
         rows.extend(scored.values())
         rows.extend(consistency)
-    rows.extend(le_spread_rows(groups, truth, var_columns))
+    rows.extend(le_spread_rows(groups, truth, var_columns, carriers=carriers))
     _apply_window_labels(rows, diagnostic, perfect_model=perfect_model)
     return rows
 
@@ -1708,6 +1752,8 @@ def le_spread_rows(
     groups: dict[tuple[str, str], list[pd.DataFrame]],
     truth: dict[tuple[str, str], bool],
     var_columns: list[str],
+    *,
+    carriers: dict[str, frozenset[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """The perfect-model large-ensemble spread test (metrics_reference §III.2).
 
@@ -1758,11 +1804,11 @@ def le_spread_rows(
     for column in var_columns:
         if column not in wanted:
             continue
-        true = _stacked(truth_frames, column)
+        true = _stacked(carrying(truth_frames, carriers, column), column)
         if true is None:
             continue
         for member_frames in predicted:
-            pred = _stacked(member_frames, column)
+            pred = _stacked(carrying(member_frames, carriers, column), column)
             if pred is None:
                 continue
             common = pred.merge(true[["time"]], on="time", how="inner")["time"]

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Tier II
+
+- **A variable's ensemble is the sources that carry it.** One `raw_output` can hold
+  several variables: the full default `ClimateBench2_TierII` suite writes all of
+  `annual_mean_timeseries` into one table, and the published `cre_score` split run
+  held `swcre` and `lwcre` together. A comparison member staged for one of them but
+  not the other sat in the table with NULLs, emptied its model's inner join in
+  `stack_members`, and silently dropped that whole model from the other variable's
+  `E_ref` (rlut: 15 models instead of 18 in the first full-suite cloud run). The
+  scoring pass now groups, per variable, only the sources with a value for it
+  (`scoring_pass.variable_carriers`), so a full-suite run gives the split-suite rows.
+  Published `lwcre`/`swcre` scores change: GISS-E2-1-G (6 `lwcre`, 5 `swcre`
+  members) re-enters both, `E_ref` 0.2551 → 0.2473 (`lwcre`) and 0.2926 → 0.2781
+  (`swcre`) for MPI-ESM1-2-LR. The frozen bundle and its fingerprint are unchanged.
+
 ## 2.0.0 (2026-10-30)
 
 The ClimateBench v2 protocol as published, with the fixes and additions made
