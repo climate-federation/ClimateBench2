@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 2.0.1 (2026-11-02)
+
+Fixes found by the first end-to-end run of the cloud runner (MPI-ESM1-2-LR, ten
+members, the full default suites against the v2.0.0 frozen comparison bundle), plus
+one ratified protocol decision. The frozen comparison bundle is re-frozen under 2.0.1
+(the CLI refuses a bundle of another version); its protocol fingerprint is unchanged.
+
+### Tier I
+
+- **`historical` ends at 2014** (ratified 2026-11-02, decision E.7). A submission's
+  `historical` member is historical + SSP2-4.5 spliced to 2100; Tier I now receives it
+  cut at `windows.pre_test_last_year()` (`tier2.test_window_start` − 1), in the CLI so
+  every entry point agrees. I.3c was already windowed (1983–2014); I.8b's 12-month
+  ITCZ–EFE climatology read the whole record and so averaged in the scenario and the
+  reserved test window. The paper's Tier I run used a historical-only farm, so the
+  published I.8b values stand. The per-member events suite keeps each member's full
+  record.
 
 ### Tier II
 
@@ -10,12 +26,34 @@
   held `swcre` and `lwcre` together. A comparison member staged for one of them but
   not the other sat in the table with NULLs, emptied its model's inner join in
   `stack_members`, and silently dropped that whole model from the other variable's
-  `E_ref` (rlut: 15 models instead of 18 in the first full-suite cloud run). The
-  scoring pass now groups, per variable, only the sources with a value for it
+  `E_ref` (rlut: 15 models instead of 18 in the full-suite run). The scoring pass now
+  groups, per variable, only the sources with a value for it
   (`scoring_pass.variable_carriers`), so a full-suite run gives the split-suite rows.
-  Published `lwcre`/`swcre` scores change: GISS-E2-1-G (6 `lwcre`, 5 `swcre`
-  members) re-enters both, `E_ref` 0.2551 → 0.2473 (`lwcre`) and 0.2926 → 0.2781
-  (`swcre`) for MPI-ESM1-2-LR. The frozen bundle and its fingerprint are unchanged.
+  **Published `lwcre`/`swcre` scores change:** GISS-E2-1-G (6 `lwcre`, 5 `swcre`
+  members) re-enters both ensembles; for MPI-ESM1-2-LR `E_ref` goes 0.2551 → 0.2473
+  (`lwcre`) and 0.2926 → 0.2781 (`swcre`), skill −0.345 → −0.387 and −0.647 → −0.733.
+  Every other published Tier II row is unchanged.
+
+### Data
+
+- **One variable at several frequencies.** A CMIP-style member directory holds
+  `Amon/pr` *and* `day/pr` (the layout `deploy/README.md` documents); ClimateEval
+  loaded them as two `pr` cubes and refused both ("Got 2 cubes … expecting 1"), so the
+  submission's `pr` silently vanished from every Tier II entry, the events
+  hemispheric asymmetry, the whole daily suite and Tier I I.3c/I.8b.
+  `climatebench2.data.frequency` now gives each suite entry the frequency its
+  variables name (experiment suites: monthly, except the `day` experiment; the
+  perfect-model truth: per variable). Data without the ambiguity loads exactly as
+  before. Upstream candidate: the same narrowing in ClimateEval's
+  `get_prepared_cube`.
+
+### Cloud runner
+
+- `run.json` records `climatebench2.__version__` (a stale editable install reported
+  0.1.0 for a 2.0.0 run).
+- `run.json`'s `unscored` lists only skill-bearing rows (submission and baselines with
+  a CRPS) that ended without `E_ref`, not the consistency and `reason` rows that never
+  carry one.
 
 ## 2.0.0 (2026-10-30)
 

@@ -118,8 +118,8 @@ On EKS:
 kubectl apply -f deploy/k8s/base.yaml          # namespace + service account
 kubectl -n climatebench create secret generic cb2-gcs-hmac \
     --from-literal=access_id=GOOG1E... --from-literal=secret=...   # the cb2-scorer HMAC key
-deploy/submit.sh MyModel gs://climatebench-submissions/MyModel/ 2.0.0
-deploy/submit.sh MyModel s3://my-bucket/MyModel/ 2.0.0   # S3: needs the IRSA role in base.yaml
+deploy/submit.sh MyModel gs://climatebench-submissions/MyModel/ 2.0.1
+deploy/submit.sh MyModel s3://my-bucket/MyModel/ 2.0.1   # S3: needs the IRSA role in base.yaml
 ```
 
 Each run uploads `gs://climatebench/v2/results/<name>/<UTC timestamp>/` (or `--output-uri`), which contains:

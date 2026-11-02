@@ -3,8 +3,8 @@
 #
 #   deploy/submit.sh MODEL_NAME MODEL_URI [IMAGE_TAG]
 #
-# e.g. deploy/submit.sh MyModel gs://climatebench-submissions/MyModel/ 2.0.0
-#      deploy/submit.sh MyModel s3://my-bucket/MyModel/ 2.0.0   # needs the IRSA role
+# e.g. deploy/submit.sh MyModel gs://climatebench-submissions/MyModel/ 2.0.1
+#      deploy/submit.sh MyModel s3://my-bucket/MyModel/ 2.0.1   # needs the IRSA role
 # gs:// submissions are read with the cb2-gcs-hmac key; results land in
 # gs://climatebench/v2/results/MODEL_NAME/<timestamp>/.
 set -euo pipefail
