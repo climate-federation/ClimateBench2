@@ -258,3 +258,45 @@ def test_main_reads_only_the_submission_with_the_key(
         ("gs://climatebench/v2/comparison/", False),
         ("gs://climatebench-submissions/MyModel/", True),
     ]
+
+
+def test_software_versions_report_the_package_version(cb2_run) -> None:  # noqa: ANN001
+    """Not importlib.metadata: a stale editable install said 0.1.0 for 2.0.0."""
+    import climatebench2
+
+    assert cb2_run.software_versions()["climatebench2"] == climatebench2.__version__
+
+
+def test_unscored_rows_lists_only_skill_rows_missing_e_ref(cb2_run, tmp_path) -> None:  # noqa: ANN001
+    """Consistency tests and reason rows never carry E_ref; only real gaps count."""
+    duckdb = pytest.importorskip("duckdb")
+    nan = None
+    rows = [
+        # (data_id, data_type, var_id, crps, e_ref)
+        ("M", "to_benchmark", "tas", 0.1, 0.2),  # scored: fine
+        ("M", "to_benchmark", "pr", 0.1, nan),  # a real gap
+        ("Climatology", "baseline", "pr", 0.3, nan),  # a real gap
+        ("M", "to_benchmark", "tas_trend_consistency", nan, nan),  # by design
+        ("CMIP6_A", "other", "tas", nan, nan),  # single member: reason row
+        ("CMIP6_B", "other", "tas", 0.2, nan),  # not the submission's
+    ]
+    db = tmp_path / "ClimateBench2_TierII.ddb"
+    con = duckdb.connect(str(db))
+    con.execute("create schema annual_mean_timeseries")
+    con.execute(
+        "create table annual_mean_timeseries.metrics (data_id varchar, data_type "
+        "varchar, var_id varchar, crps double, e_ref double, scorer varchar)",
+    )
+    con.executemany(
+        "insert into annual_mean_timeseries.metrics values (?, ?, ?, ?, ?, 'climatebench2')",
+        rows,
+    )
+    con.close()
+    assert cb2_run.unscored_rows(tmp_path) == [
+        {
+            "suite": "ClimateBench2_TierII",
+            "diagnostic": "annual_mean_timeseries",
+            "var_id": "pr",
+            "rows": 2,
+        },
+    ]

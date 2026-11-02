@@ -283,8 +283,24 @@ def _variant_key(path: Path) -> tuple[int, ...]:
 # -- results -----------------------------------------------------------------
 
 
+#: The ``metrics`` predicate of a row that should carry an ``E_ref`` but does
+#: not: a Tier II score row with a CRPS (so not a consistency test, a Perkins
+#: overlap, a single-member or observational-product ``reason`` row — none of
+#: which ever has one) and no ``E_ref``.
+UNSCORED_WHERE = (
+    "scorer = 'climatebench2' and crps is not null and e_ref is null "
+    "and data_type in ('to_benchmark', 'baseline')"
+)
+
+
 def unscored_rows(out_dir: Path) -> list[dict[str, Any]]:
-    """Scored Tier II rows of the submission that ended without an ``E_ref``."""
+    """Skill-bearing rows (submission, baselines) that ended without an ``E_ref``.
+
+    Only rows the protocol scores against ``E_ref`` count: a row with a CRPS
+    from the submission or a baseline. Consistency tests and the other
+    ``reason`` rows never carry one by design, so listing them would hide the
+    real gaps (a variable with no frozen comparison rows) in noise.
+    """
     try:
         import duckdb
     except ImportError:
@@ -294,12 +310,13 @@ def unscored_rows(out_dir: Path) -> list[dict[str, Any]]:
         con = duckdb.connect(str(db), read_only=True)
         try:
             tables = con.sql(
-                "select schema_name from duckdb_columns() where table_name = 'metrics' and column_name = 'e_ref'",
+                "select schema_name from duckdb_columns() where table_name = 'metrics' "
+                "and column_name = 'e_ref'",
             ).fetchall()
             for (schema,) in tables:
                 for var_id, n in con.sql(
                     f'select var_id, count(*) from "{schema}".metrics '  # noqa: S608
-                    "where scorer = 'climatebench2' and e_ref is null group by var_id",
+                    f"where {UNSCORED_WHERE} group by var_id",
                 ).fetchall():
                     rows.append({"suite": db.stem, "diagnostic": schema, "var_id": var_id, "rows": n})
         except duckdb.Error as err:
@@ -312,10 +329,12 @@ def unscored_rows(out_dir: Path) -> list[dict[str, Any]]:
 def software_versions() -> dict[str, str]:
     versions = {"climateeval_commit": Path("/opt/climateeval/COMMIT").read_text().strip()
                 if Path("/opt/climateeval/COMMIT").exists() else "unknown"}
+    # The package's own version, not importlib.metadata's: a stale editable
+    # install reported 0.1.0 for a 2.0.0 run (first cloud e2e, 2026-10-30).
     try:
-        from importlib.metadata import version
+        import climatebench2
 
-        versions["climatebench2"] = version("climatebench2")
+        versions["climatebench2"] = climatebench2.__version__
     except Exception:  # noqa: BLE001
         versions["climatebench2"] = "unknown"
     versions["image"] = os.environ.get("CB2_IMAGE", "unknown")
