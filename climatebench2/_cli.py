@@ -138,6 +138,15 @@ class SuiteSpec:
         out the 12 h daily job (2026-09-26). False for
         ``ClimateBench2_TierI_variability``, whose ``full`` window means "this
         is a piControl with its own calendar", where any clip is wrong.
+    ``historical_pre_test``
+        Only for a once-per-model experiment suite: its ``historical`` input
+        ends at :func:`climatebench2.windows.pre_test_last_year` (2014), the
+        year before the reserved test window. True for Tier I (ratified by
+        Duncan, 2026-11-02): a submission's ``historical`` is historical +
+        SSP2-4.5 spliced to 2100, and the I.8b ITCZ–EFE climatology, which
+        reads the whole record, would otherwise average in the scenario and
+        the held-out years. The per-member events suite keeps each member's
+        full record (the realized warming level *is* a test-window statistic).
     """
 
     shape: str
@@ -145,6 +154,7 @@ class SuiteSpec:
     window: str = "historical"
     per_member: bool = False
     reference_overlap: bool = False
+    historical_pre_test: bool = False
     note: str = ""
 
 
@@ -154,7 +164,8 @@ class SuiteSpec:
 SUITE_REGISTRY: dict[str, SuiteSpec] = {
     "ClimateBench2_TierI": SuiteSpec(
         shape="experiments",
-        note="Tier I gates: one experiment dict, historical in full",
+        historical_pre_test=True,
+        note="Tier I gates: one experiment dict, historical up to 2014",
     ),
     "ClimateBench2_TierI_variability": SuiteSpec(
         shape="cubes",
@@ -266,6 +277,30 @@ def discover_members(root: Path, *, max_depth: int = 3) -> dict[str, Path]:
         key=lambda item: (len(item[1]), str(item[0])),
     )
     return dict(sorted(members.items())) if len(members) > 1 else {}
+
+
+def end_at_year(cubes: Any, last_year: int) -> Any:  # noqa: ANN401
+    """``cubes`` with every time series cut to end in ``last_year`` (lazy).
+
+    A cube without a time axis (``fx``) is kept, one lying wholly after
+    ``last_year`` is dropped; anything that is not an iris ``CubeList`` (a
+    test stub) passes through unchanged.
+    """
+    from iris import Constraint
+    from iris.cube import CubeList
+
+    if not isinstance(cubes, CubeList):
+        return cubes
+    before = Constraint(time=lambda cell: cell.point.year <= last_year)
+    kept = CubeList()
+    for cube in cubes:
+        if not cube.coords("time"):
+            kept.append(cube)
+            continue
+        cut = cube.extract(before)
+        if cut is not None:
+            kept.append(cut)
+    return kept
 
 
 def _resolve_suite(name: str) -> str:
@@ -718,6 +753,13 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
     for key, path in experiment_paths.items():
         experiments[key] = load_experiment(key, path)
         print(f"Loaded experiment '{key}' from {path} (full record)", file=sys.stderr)
+    # Tier I's `historical` ends before the reserved test window
+    # (`SuiteSpec.historical_pre_test`); a lazy time cut of the same cubes.
+    pre_test_year = windows.pre_test_last_year()
+    experiments_pre_test = {
+        **experiments,
+        "historical": end_at_year(experiments["historical"], pre_test_year),
+    }
 
     def info_for(label: str) -> DataSourceInformation:
         """Provenance for one member (the variant separates their data ids)."""
@@ -970,7 +1012,20 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
                         f"every member; running it once instead",
                         file=sys.stderr,
                     )
-                runs = [(experiments, info_for(first_label))]
+                if spec.historical_pre_test:
+                    print(
+                        f"Suite '{stem}': `historical` ends in {pre_test_year}, "
+                        f"the year before the reserved test window",
+                        file=sys.stderr,
+                    )
+                runs = [
+                    (
+                        experiments_pre_test
+                        if spec.historical_pre_test
+                        else experiments,
+                        info_for(first_label),
+                    ),
+                ]
         elif spec.source == "picontrol":
             if "picontrol" in experiments:
                 runs = [(experiments["picontrol"], info_for(first_label))]

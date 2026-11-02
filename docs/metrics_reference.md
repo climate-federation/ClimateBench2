@@ -250,7 +250,7 @@ them is stale by construction.
 
 ---
 
-# Decisions needed from Duncan (2026-09-14, updated 2026-09-21 and 2026-10-30)
+# Decisions needed from Duncan (2026-09-14, updated 2026-09-21, 2026-10-30 and 2026-11-02)
 
 Every ⚠ and `TODO(Duncan)` the implementation raised, in one list. Nothing here blocks
 the code from running — each item is a **choice already made provisionally**, recorded
@@ -296,6 +296,10 @@ survives.
   comparison data layer (the `E_ref` ensemble) that has no Tier I gate rows keeps its
   place in the ensemble: comparison membership does not depend on Tier I, and no
   model is added to or removed from the data layer for it.
+
+**Ratified 2026-11-02 (Duncan), for v2.0.1.**
+- **Tier I `historical` ends at the pre-test year** (2014; E.7). Applied by the CLI to
+  every once-per-model Tier I suite.
 
 A new group **E** records the protocol questions the first real runs raised. Those are
 **not** decisions already taken in code — they are observations that the code is doing
@@ -699,6 +703,18 @@ bound is unreachable or the definition is ambiguous. They are recorded here rath
 
    **RATIFIED 2026-10-30 (Duncan): keep the per-model cap**, applied before variable
    availability. No restaging, no bundle change.
+7. **Tier I's `historical` stops at 2014 (2026-11-01).** A submission's `historical`
+   member is historical + SSP2-4.5 spliced to 2100 (that is what Tier II needs), and the
+   CLI handed Tier I the first member's record as `historical` in full. I.3c is already
+   windowed (1983–2014); I.8b's 12-month ITCZ–EFE climatology reads the whole record,
+   so it averaged in the scenario and the reserved test window, while the paper's Tier
+   I run used a historical-only farm (1850–2014).
+
+   **RATIFIED 2026-11-02 (Duncan): every once-per-model Tier I suite's `historical`
+   input ends at `windows.pre_test_last_year()`** = `tier2.test_window_start` − 1 =
+   2014, applied in the CLI (`_cli.SuiteSpec.historical_pre_test`, `end_at_year`) so
+   every entry point agrees. The per-member Tier II events suite keeps each member's
+   full record (the realized warming level is a test-window statistic). → I.3c, I.8b.
 
 ---
 
@@ -1681,7 +1697,8 @@ regress the latitude of the zonal-mean precipitation maximum on the EFE latitude
 **slope within ±50% of ~3°/PW** (i.e. |slope| ∈ [1.5, 4.5] °/PW, negative sign for
 ITCZ-vs-southward-flux convention) and **r > 0.9**.
 
-**Status: ✅** — `diags/tier1_physics.py::ITCZEFEGate` (`historical`):
+**Status: ✅** — `diags/tier1_physics.py::ITCZEFEGate` (`historical`, which the CLI
+ends in 2014, the year before the test window — decision E.7, ratified 2026-11-02):
 `climate_statistics(period="month")` gives 12 zonal-mean maps of the nine flux
 variables and `pr`; per month AMET via `physics.meridional_transport`, F_xeq = AMET at
 0° (`np.interp`), ITCZ = argmax of zonal-mean `pr` within ±30°;
