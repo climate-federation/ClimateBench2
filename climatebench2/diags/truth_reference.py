@@ -159,8 +159,16 @@ class LocalCMORReference(DataSource):
         *,
         download_missing_data: bool = True,  # noqa: ARG002
     ) -> Cube:
-        """One variable of the truth run, preprocessed like any reference."""
-        return get_prepared_cube(self._cubes(variable), variable)
+        """One variable of the truth run, preprocessed like any reference.
+
+        A truth directory holding the variable at several frequencies
+        (``Amon/pr`` + ``day/pr``) is narrowed to ``variable.frequency``
+        first (:mod:`climatebench2.data.frequency`).
+        """
+        from climatebench2.data.frequency import select_frequency
+
+        cubes = select_frequency(self._cubes(variable), variable.frequency)
+        return get_prepared_cube(cubes, variable)
 
 
 def _member_class(label: str) -> type[LocalCMORReference]:

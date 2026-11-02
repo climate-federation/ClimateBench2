@@ -6,7 +6,7 @@ behind the pattern-scaling baseline (``erf_ar6_ssp245.csv``, read by
 :func:`climatebench2.baselines.load_erf_series`).
 
 Model output and observations never live here — they come from ClimateEval
-DataSources (docs/climateeval_delineation_plan.md, the ownership test). Four
+DataSources (docs/climateeval_delineation_plan.md, the ownership test). Five
 things that do:
 
 * :class:`~climatebench2.data.cmip6_staged.StagedCMIP6HistoricalSSP245` — a
@@ -32,6 +32,11 @@ things that do:
   ``phcint``, which the pinned ESMValCore lacks), run as a suite variable's
   ``additional_preprocessors`` step so the submission, the references and the
   comparison ensemble all score OHC from ``thetao``. Belongs upstream too.
+* :mod:`~climatebench2.data.frequency` — narrows a submission that provides
+  one variable at several frequencies (``Amon/pr`` + ``day/pr``) to the one
+  each suite entry names, which ClimateEval's ``get_prepared_cube`` cannot do
+  (it extracts by ``var_name`` only). Upstream candidate: the same narrowing
+  by ``variable.frequency`` inside ``get_prepared_cube``.
 """
 
 from climatebench2.data.cmip6_staged import (

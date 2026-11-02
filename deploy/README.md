@@ -64,6 +64,15 @@ each variable's scored window** (the 1985–2014 years are each source's anomaly
 baseline; a variable with fewer than 10 baseline years is left unscored, never scored
 on absolute values). A variable that is absent is skipped, not failed.
 
+One variable may be uploaded at several frequencies (a CMOR DRS tree with `Amon/pr/…`
+*and* `day/pr/…` in the same member directory): each suite entry reads the frequency
+its variables name — the monthly Tier II suite and Tier I the monthly `pr`, the daily
+suite the daily one (`climatebench2.data.frequency`). The frequency is taken from the
+files' CMOR `frequency` attribute, else from the time step. An entry that wants a
+frequency the member does not provide (the 1-hourly diurnal-cycle entries, when only
+`Amon` and `day` are uploaded) gets no data for that variable rather than another
+sampling.
+
 **Ocean heat content: upload `thetao`, not `phcint`.** The OHC rows (full column,
 0–2000 m, 0–100 m; scored 2015–2024 against IAP) are computed from `thetao` (Omon,
 sea water potential temperature, `degC` or `K`) by the scorer itself, exactly as for the

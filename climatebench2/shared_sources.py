@@ -78,7 +78,7 @@ from climateeval.suites import Suite
 from loguru import logger
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from climateeval.data import DataSourceInformation
     from climateeval.diags._base import Diagnostic
@@ -190,7 +190,13 @@ class EntrySuite(Suite):
     per call, as before.
     """
 
-    def __init__(self, parent: Suite, entry: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        parent: Suite,
+        entry: dict[str, Any],
+        *,
+        share: bool = True,
+    ) -> None:
         """Wrap entry ``entry`` of ``parent``'s definition."""
         super().__init__(
             parent._suite_definition_file,  # noqa: SLF001
@@ -198,6 +204,7 @@ class EntrySuite(Suite):
             variable_kwargs=parent._variable_kwargs,  # noqa: SLF001
         )
         self._suite_definition = [entry]
+        self._share = share
         self._shared: dict[str, Diagnostic] | None = None
         #: Whether the entry's diagnostic is shared across members; ``None``
         #: until it has been built.
@@ -207,7 +214,7 @@ class EntrySuite(Suite):
         if self._shared is not None:
             return self._shared
         diagnostics = super()._get_diagnostics()
-        self.shared = all(
+        self.shared = self._share and all(
             share_member_invariant_stages(diag) for diag in diagnostics.values()
         )
         if self.shared:
@@ -249,6 +256,7 @@ def run_members(
     *,
     database_resource: str,
     share: bool = True,
+    select_data: Callable[[Any, dict[str, Any]], Any] | None = None,
 ) -> MemberRunReport:
     """Write every ``(data, information)`` run of ``suite`` into one database.
 
@@ -257,9 +265,16 @@ def run_members(
     ensemble once (module docstring). Without it — ``--no-cache``, or a
     single run — this is exactly the old loop: one ``Suite.get_database``
     per run, appending after the first.
+
+    ``select_data(data, entry)``, when given, narrows each run's data to
+    what one suite entry needs (the submission's ``pr`` at the entry's
+    ``frequency`` when its member directory holds ``Amon/pr`` *and*
+    ``day/pr``: :func:`climatebench2.data.frequency.select_for_entry`); the
+    suite then always runs entry by entry, sharing only as ``share`` says.
     """
     report = MemberRunReport(members=len(runs))
-    if not share or len(runs) < 2:  # noqa: PLR2004
+    sharing = share and len(runs) >= 2  # noqa: PLR2004
+    if not sharing and select_data is None:
         for index, (data, information) in enumerate(runs):
             suite.get_database(
                 data,
@@ -271,11 +286,11 @@ def run_members(
 
     first = True
     for entry in suite._suite_definition:  # noqa: SLF001
-        entry_suite = EntrySuite(suite, entry)
+        entry_suite = EntrySuite(suite, entry, share=sharing)
         try:
             for data, information in runs:
                 entry_suite.get_database(
-                    data,
+                    data if select_data is None else select_data(data, entry),
                     information,
                     database_resource=database_resource,
                     append=not first,
@@ -284,6 +299,8 @@ def run_members(
         finally:
             entry_suite.release()
         name = str(entry.get("name", "?"))
+        if not sharing:
+            continue
         (report.shared if entry_suite.shared else report.unshared).append(name)
         if entry_suite.shared:
             logger.info(

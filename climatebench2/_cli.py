@@ -695,11 +695,28 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
     # era, Pinatubo, the clear-sky and ITCZ-EFE records). The first member's
     # own output serves as "historical" unless --experiment historical=DIR
     # overrides it — Tier I is evaluated once per model, not per member.
+    from climatebench2.data import frequency
+
+    def load_experiment(key: str, path: Path) -> Any:  # noqa: ANN401
+        """One experiment at the frequency its complex diagnostics read.
+
+        A CMIP-style directory holds several tables (``Amon/pr`` and
+        ``day/pr``); ClimateEval returns one cube per table and then refuses
+        the ambiguous ``var_name``. The Tier I/events/III diagnostics read
+        every experiment monthly except ``day`` (``data.frequency``).
+        """
+        return frequency.select_frequency(
+            load(path, None),
+            frequency.experiment_frequency(key),
+        )
+
     first_label, first_path = next(iter(members.items()))
-    experiments: dict[str, Any] = {"historical": load(first_path, None)}
+    experiments: dict[str, Any] = {
+        "historical": load_experiment("historical", first_path),
+    }
     explicit_historical = "historical" in experiment_paths
     for key, path in experiment_paths.items():
-        experiments[key] = load(path, None)
+        experiments[key] = load_experiment(key, path)
         print(f"Loaded experiment '{key}' from {path} (full record)", file=sys.stderr)
 
     def info_for(label: str) -> DataSourceInformation:
@@ -936,7 +953,13 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
                 # historical record under the `historical` key, with its own
                 # variant in the data id; every other experiment is shared.
                 runs = [
-                    ({**experiments, "historical": load(path, None)}, info_for(label))
+                    (
+                        {
+                            **experiments,
+                            "historical": load_experiment("historical", path),
+                        },
+                        info_for(label),
+                    )
                     for label, path in members.items()
                 ]
             else:
@@ -1023,11 +1046,29 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
         # their complex diagnostics have no such stages to share.
         from climatebench2.shared_sources import run_members
 
+        # A member directory holding one variable at several frequencies
+        # (`Amon/pr` + `day/pr`, the documented CMIP-style layout) gives each
+        # cube-suite entry only the frequency its variables name; without
+        # that ambiguity the suite runs exactly as before.
+        ambiguous = {
+            name
+            for data, _info in runs
+            if not isinstance(data, dict)
+            for name in frequency.ambiguous_variables(data)
+        }
+        if ambiguous:
+            print(
+                f"Suite '{stem}': the submission provides "
+                f"{', '.join(sorted(ambiguous))} at several frequencies; each "
+                f"entry reads the frequency its variables name",
+                file=sys.stderr,
+            )
         report = run_members(
             suite,
             runs,
             database_resource=f"duckdb://{db_path}",
             share=spec.shape == "cubes" and not args.no_cache,
+            select_data=frequency.select_for_entry if ambiguous else None,
         )
         if len(runs) > 1:
             print(f"Suite '{stem}': {report.summary()}", file=sys.stderr)
