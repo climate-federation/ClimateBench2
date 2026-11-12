@@ -63,12 +63,30 @@ climatebench2/
 
 ## Key integration facts
 
+- **No threshold is read at import or class-definition time** (the layer stack in
+  `_thresholds.py` can change after import). A gate's `_gate_checks` hold lazy
+  `Threshold(".range", 0)` / `Band(...)` bounds and a `GateCheck.block`; `requirement`
+  and `tier` come from the block. Always go through `pass_fail.resolved_checks(cls_or_instance)`
+  for concrete numbers. `_threshold_block` (a string, or `{block: other_block}`) repoints a
+  gate at another thresholds block; inside methods read the gate's own block with
+  `self._threshold("tier1.x.key")` so the repoint is honoured. `tests/test_gate_lazy_bounds.py` guards it.
 - ClimateEval's `Suite` loads any importable `diagnostic:` class path (`str_to_object`);
   a CB2 diagnostic need only subclass `climateeval.diags._base.Diagnostic`.
 - Where ClimateEval already computes the quantity (ECS, land-ocean warming ratio,
   Arctic amplification, meridional heat transport), the CB2 gate is a **thin wrapper
   subclassing the upstream diagnostic** (`GateMixin`) that feeds `thresholds.yml`
   constants into its kwargs and gates its output columns. Never copy the physics.
+- **Experiment keys are indirected.** Every complex gate has `keys: ClassVar[dict[str, str]]`
+  (role -> data key, CB2 defaults: `control: picontrol`, `abrupt: 4xco2`, `historical`, ...),
+  reads `data[self.keys["control"]]`, and `_required_data_keys` is derived from `keys`
+  (`pass_fail.ExperimentKeysMixin`), so a subclass overrides `keys` only. `_UpstreamGate`
+  wrappers also set `_upstream_keys` (role -> key upstream reads) and present upstream a view
+  of the data under those keys. `optional_keys` lists non-required roles.
+- Optional switch `tier2.internal_variability.source` (`picontrol` default | `ensemble_spread`):
+  with `ensemble_spread`, `InternalVariability` emits nothing and the scoring pass takes
+  sigma_int from `scoring.ensemble_spread_sigma(members, statistic)` (NaN below 3 members).
+- `tier3.spinup_years` / `tier3.block_years` are read through `PaleoProxyScore._block_override`:
+  the diagnostic's own `_threshold_block` may override them (fixed-SST paleo: 5 spin-up years).
 - Multi-experiment inputs follow the `ECS` `ComplexDiagnostic` pattern
   (`_required_data_keys` + `ComplexDataSource`). CB2 complex diagnostics accept a
   *superset* of their required keys so one experiment dict feeds a whole suite.

@@ -503,19 +503,20 @@ def test_upstream_gate_wrappers_subclass_climateeval_diagnostics() -> None:
 
 def test_upstream_gate_wrappers_carry_the_protocol_thresholds() -> None:
     from climatebench2 import diags
+    from climatebench2.diags.pass_fail import resolved_checks
 
-    (land_ocean,) = diags.LandOceanWarmingGate._gate_checks
+    (land_ocean,) = resolved_checks(diags.LandOceanWarmingGate)
     assert land_ocean.check_id == "land_ocean_warming"
     assert land_ocean.column == "land_ocean_warming_ratio"
     assert (land_ocean.lower, land_ocean.upper) == (1.2, 1.6)
 
-    (arctic,) = diags.ArcticAmplificationGate._gate_checks
+    (arctic,) = resolved_checks(diags.ArcticAmplificationGate)
     assert arctic.column == "arctic_amplification"
     assert (arctic.lower, arctic.upper) == (1.5, None)
 
     bounds = {
         check.check_id: (check.column, check.lower, check.upper)
-        for check in diags.MeridionalHeatTransportGate._gate_checks
+        for check in resolved_checks(diags.MeridionalHeatTransportGate)
     }
     assert bounds["omet_peak"] == ("omet_peak", 1.5, 2.0)
     assert bounds["omet_peak_lat"] == ("omet_peak_lat", 15.0, 20.0)

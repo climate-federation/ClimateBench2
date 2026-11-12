@@ -77,7 +77,7 @@ from climateeval.diags._utils import union
 
 from climatebench2 import physics, windows
 from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import GateCheck, gate_requirement, gate_tier
+from climatebench2.diags.pass_fail import BlockTag, GateCheck, Threshold
 from climatebench2.diags.tier1_physics import CB2ComplexDiagnostic, _filled, _mon
 from climatebench2.scoring_pass import SCALAR_SIGMA_OBS_SUFFIX
 
@@ -345,9 +345,9 @@ class RealizedWarmingLevel(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
     logged warning instead of the two test-window scalars.
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
     #: Protocol standing (thresholds.yml): reported numbers, never a gate.
-    requirement: ClassVar[str] = gate_requirement("tier2.warming_level")
+    requirement: ClassVar[str] = BlockTag("tier2.warming_level")  # type: ignore[assignment]
 
     def _series(self, data: CubeList | Dataset) -> tuple[np.ndarray, np.ndarray]:
         return self._annual_global_series_years(data, _mon("tas"))
@@ -420,7 +420,7 @@ class RealizedWarmingLevel(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        values, years = self._series(complex_data_source.data["historical"])
+        values, years = self._series(complex_data_source.data[self.keys["historical"]])
         return self._scalar_outputs(self._scalars(values, years))
 
 
@@ -443,21 +443,19 @@ class PinatuboResponseGate(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
     co-variation test of §II.1, nor is ENSO regressed out.
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
     _gate_checks = (
         GateCheck(
             check_id="pinatubo_dimming",
             column="pinatubo_rsds_anom",
-            upper=get_threshold("tier2.pinatubo.rsds_anomaly_max"),
-            requirement=gate_requirement("tier2.pinatubo"),
-            tier=gate_tier("tier2.pinatubo"),
+            upper=Threshold(".rsds_anomaly_max"),
+            block="tier2.pinatubo",
         ),
         GateCheck(
             check_id="pinatubo_cooling",
             column="pinatubo_tas_anom",
-            upper=get_threshold("tier2.pinatubo.tas_anomaly_max"),
-            requirement=gate_requirement("tier2.pinatubo"),
-            tier=gate_tier("tier2.pinatubo"),
+            upper=Threshold(".tas_anomaly_max"),
+            block="tier2.pinatubo",
         ),
     )
 
@@ -503,7 +501,7 @@ class PinatuboResponseGate(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        historical = complex_data_source.data["historical"]
+        historical = complex_data_source.data[self.keys["historical"]]
         return self._scalar_outputs(
             {
                 "pinatubo_rsds_anom": self._anomaly(historical, _mon("rsds")),
@@ -528,28 +526,26 @@ class HemisphericAsymmetryGate(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
     after the aerosol era, so it stays a model-only sign flag.
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
     _gate_checks = (
         GateCheck(
             check_id="hemispheric_trend_asymmetry",
             column="nh_minus_sh_trend",
-            upper=get_threshold("tier2.hemispheric_asymmetry.nh_minus_sh_trend_max"),
-            requirement=gate_requirement("tier2.hemispheric_asymmetry"),
-            tier=gate_tier("tier2.hemispheric_asymmetry"),
+            upper=Threshold(".nh_minus_sh_trend_max"),
+            block="tier2.hemispheric_asymmetry",
         ),
         GateCheck(
             check_id="itcz_southward_shift",
             column="itcz_shift_deg_per_decade",
-            upper=get_threshold("tier2.hemispheric_asymmetry.itcz_shift_max"),
-            requirement=gate_requirement("tier2.hemispheric_asymmetry"),
-            tier=gate_tier("tier2.hemispheric_asymmetry"),
+            upper=Threshold(".itcz_shift_max"),
+            block="tier2.hemispheric_asymmetry",
         ),
     )
 
     @property
     def _era(self) -> tuple[int, int]:
         """Aerosol era (first, last year) from ``thresholds.yml``."""
-        era = get_threshold("tier2.hemispheric_asymmetry.era")
+        era = self._threshold("tier2.hemispheric_asymmetry.era")
         return (int(era[0]), int(era[1]))
 
     def _hemisphere_trend(
@@ -607,7 +603,7 @@ class HemisphericAsymmetryGate(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        historical = complex_data_source.data["historical"]
+        historical = complex_data_source.data[self.keys["historical"]]
         nh = self._hemisphere_trend(historical, 0.0, 90.0)
         sh = self._hemisphere_trend(historical, -90.0, 0.0)
         return self._scalar_outputs(
@@ -641,9 +637,9 @@ class _SeasonalCycleDiagnostic(ObservedScalarMixin, CB2ComplexDiagnostic):
     window-sensitive than a trend.
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
     #: Protocol standing (thresholds.yml): reported numbers, never a gate.
-    requirement: ClassVar[str] = gate_requirement("tier2.seasonal")
+    requirement: ClassVar[str] = BlockTag("tier2.seasonal")  # type: ignore[assignment]
 
     def _window(self, cube: Cube) -> Cube:
         """The climatology window of the protocol, or the whole record."""
@@ -751,7 +747,7 @@ class LandAnnualTemperatureRange(_SeasonalCycleDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        cube = self._cube(complex_data_source.data["historical"], _mon("tas"))
+        cube = self._cube(complex_data_source.data[self.keys["historical"]], _mon("tas"))
         return self._scalar_outputs(
             {
                 "land_annual_temperature_range": self._range(cube),
@@ -779,7 +775,7 @@ class _StratocumulusRegression(_SeasonalCycleDiagnostic):
 
     def _slopes(self, predictand: Cube, sst: Cube) -> dict[str, float]:
         """One slope per deck plus their mean, from two 12-month climatologies."""
-        decks = get_threshold("tier2.seasonal.stratocumulus_regions")
+        decks = self._threshold("tier2.seasonal.stratocumulus_regions")
         out: dict[str, float] = {}
         values: list[float] = []
         for deck, box in decks.items():
@@ -805,7 +801,7 @@ class _StratocumulusRegression(_SeasonalCycleDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        historical = complex_data_source.data["historical"]
+        historical = complex_data_source.data[self.keys["historical"]]
         return self._scalar_outputs(
             {
                 **self._slopes(

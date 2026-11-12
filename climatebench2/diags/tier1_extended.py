@@ -36,8 +36,7 @@ from esmvalcore.preprocessor import (
 from loguru import logger
 
 from climatebench2 import physics, windows
-from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import GateCheck, gate_requirement, gate_tier
+from climatebench2.diags.pass_fail import GateCheck, Threshold
 from climatebench2.diags.tier1_physics import (
     CB2ComplexDiagnostic,
     _cube_years_months,
@@ -171,7 +170,7 @@ class GeostrophicBalanceGate(CB2ComplexDiagnostic):
     the level at 850 hPa and handles masking in code).
     """
 
-    _required_data_keys = ("day",)
+    keys: ClassVar[dict[str, str]] = {"day": "day"}
     _pressure_level_pa: ClassVar[float] = 85000.0
     _ps_mask_pa: ClassVar[float] = 87000.0
 
@@ -179,9 +178,8 @@ class GeostrophicBalanceGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="geostrophic_balance",
             column="geostrophic_corr",
-            lower=get_threshold("tier1.geostrophic_balance.spatial_corr_min"),
-            requirement=gate_requirement("tier1.geostrophic_balance"),
-            tier=gate_tier("tier1.geostrophic_balance"),
+            lower=Threshold(".spatial_corr_min"),
+            block="tier1.geostrophic_balance",
         ),
     )
 
@@ -195,7 +193,7 @@ class GeostrophicBalanceGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        daily = complex_data_source.data["day"]
+        daily = complex_data_source.data[self.keys["day"]]
         ua = self._level_cube(daily, "ua")
         zg = self._level_cube(daily, "zg")
         # The two are rarely published over the same period, so pair them by
@@ -244,14 +242,13 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
     fixed-SST experiments (GFMIP protocol; not in the CMIP6 archive).
     """
 
-    _required_data_keys = ("amip", "patch_ep", "patch_wp")
+    keys: ClassVar[dict[str, str]] = {"amip": "amip", "patch_ep": "patch_ep", "patch_wp": "patch_wp"}
     _gate_checks = (
         GateCheck(
             check_id="gfmip_patch",
             column="delta_lambda",
-            lower=get_threshold("tier1.gfmip_patch.delta_lambda_min"),
-            requirement=gate_requirement("tier1.gfmip_patch"),
-            tier=gate_tier("tier1.gfmip_patch"),
+            lower=Threshold(".delta_lambda_min"),
+            block="tier1.gfmip_patch",
         ),
     )
 
@@ -275,8 +272,8 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
         data = complex_data_source.data
-        lam_ep = self._lambda_vs_amip(data["patch_ep"], data["amip"])
-        lam_wp = self._lambda_vs_amip(data["patch_wp"], data["amip"])
+        lam_ep = self._lambda_vs_amip(data[self.keys["patch_ep"]], data[self.keys["amip"]])
+        lam_wp = self._lambda_vs_amip(data[self.keys["patch_wp"]], data[self.keys["amip"]])
         return self._scalar_outputs(
             {
                 "delta_lambda": lam_ep - lam_wp,
@@ -294,15 +291,14 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
 class Amip4xCO2ERFGate(CB2ComplexDiagnostic):
     """I.4b: fixed-SST ERF (amip-4xCO2 − amip TOA net) ∈ [6.5, 9.0] W/m²."""
 
-    _required_data_keys = ("amip", "amip4xco2")
+    keys: ClassVar[dict[str, str]] = {"amip": "amip", "amip4xco2": "amip4xco2"}
     _gate_checks = (
         GateCheck(
             check_id="amip_4xco2_erf",
             column="erf_wm2",
-            lower=get_threshold("tier1.amip_4xco2_erf.range")[0],
-            upper=get_threshold("tier1.amip_4xco2_erf.range")[1],
-            requirement=gate_requirement("tier1.amip_4xco2_erf"),
-            tier=gate_tier("tier1.amip_4xco2_erf"),
+            lower=Threshold(".range", 0),
+            upper=Threshold(".range", 1),
+            block="tier1.amip_4xco2_erf",
         ),
     )
 
@@ -316,7 +312,7 @@ class Amip4xCO2ERFGate(CB2ComplexDiagnostic):
             n = self._toa_net_annual_global(exp)
             return float(n.mean())
 
-        erf = toa_net_mean(data["amip4xco2"]) - toa_net_mean(data["amip"])
+        erf = toa_net_mean(data[self.keys["amip4xco2"]]) - toa_net_mean(data[self.keys["amip"]])
         return self._scalar_outputs({"erf_wm2": erf})
 
 
@@ -358,7 +354,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
     "not run" state the scorecard already renders as a hole.
     """
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
 
     #: 30S–30N (paper: extratropical teleconnections are explicitly not gated).
     _band: ClassVar[tuple[float, float]] = (-30.0, 30.0)
@@ -376,21 +372,18 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
     _ts_reference: ClassVar[type[DataSource]] = HadISST
     _pr_reference: ClassVar[type[DataSource]] = GPCP
 
-    _corr_min = get_threshold("tier1.enso.teleconnection_pattern_corr_min")
     _gate_checks = (
         GateCheck(
             check_id="enso_teleconnection_ts",
             column="teleconnection_corr_ts",
-            lower=_corr_min,
-            requirement=gate_requirement("tier1.enso"),
-            tier=gate_tier("tier1.enso"),
+            lower=Threshold(".teleconnection_pattern_corr_min"),
+            block="tier1.enso",
         ),
         GateCheck(
             check_id="enso_teleconnection_pr",
             column="teleconnection_corr_pr",
-            lower=_corr_min,
-            requirement=gate_requirement("tier1.enso"),
-            tier=gate_tier("tier1.enso"),
+            lower=Threshold(".teleconnection_pattern_corr_min"),
+            block="tier1.enso",
         ),
     )
 
@@ -508,7 +501,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
         """
         from climatebench2 import reference_windows
 
-        first, last = get_threshold("tier1.enso.teleconnection_obs_window")
+        first, last = self._threshold("tier1.enso.teleconnection_obs_window")
         product = source()
         timerange = reference_windows.clip_to_source(
             windows.timerange(int(first), int(last)),
@@ -540,7 +533,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         model, lats, nino34_sigma = self._model_patterns(picontrol)
 
         values: dict[str, float] = {"nino34_std": nino34_sigma}
@@ -554,7 +547,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
         if observed is None:
             return self._scalar_outputs(values)
 
-        first, last = get_threshold("tier1.enso.teleconnection_obs_window")
+        first, last = self._threshold("tier1.enso.teleconnection_obs_window")
         values["teleconnection_obs_first_year"] = float(first)
         values["teleconnection_obs_last_year"] = float(last)
         for name in ("ts", "pr"):
@@ -672,7 +665,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     mm/day per MJ/m² (r ≈ 0.48).
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
 
     #: 20S–20N (paper I.3c).
     _band: ClassVar[tuple[float, float]] = (-20.0, 20.0)
@@ -687,19 +680,17 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="precip_buoyancy",
             column="precip_buoyancy_slope_rel_error",
-            upper=get_threshold("tier1.precip_buoyancy.rel_tolerance_vs_obs"),
-            requirement=gate_requirement("tier1.precip_buoyancy"),
-            tier=gate_tier("tier1.precip_buoyancy"),
+            upper=Threshold(".rel_tolerance_vs_obs"),
             annotate=_precip_buoyancy_reference_source,
+            block="tier1.precip_buoyancy",
         ),
     )
 
     # -- the window and the column integral ---------------------------------
 
-    @staticmethod
-    def _protocol_years() -> tuple[int, int]:
+    def _protocol_years(self) -> tuple[int, int]:
         """``tier1.precip_buoyancy.obs_window`` as (first, last) year."""
-        first, last = get_threshold("tier1.precip_buoyancy.obs_window")
+        first, last = self._threshold("tier1.precip_buoyancy.obs_window")
         return int(first), int(last)
 
     def _model_cube(self, data: CubeList | Dataset, name: str) -> Cube:
@@ -1029,7 +1020,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
             )
         else:
             return reference, True, model, used, dropped
-        stored = get_threshold("tier1.precip_buoyancy.reference_slope")
+        stored = self._threshold("tier1.precip_buoyancy.reference_slope")
         if stored is None:
             logger.warning(
                 f"Diagnostic '{self.name}': tier1.precip_buoyancy."
@@ -1049,7 +1040,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        historical = complex_data_source.data["historical"]
+        historical = complex_data_source.data[self.keys["historical"]]
         pr, ta, hus = (
             self._model_cube(historical, name) for name in ("pr", "ta", "hus")
         )
@@ -1104,14 +1095,13 @@ class MJOGate(CB2ComplexDiagnostic):
     daily precipitation > 1.5.
     """
 
-    _required_data_keys = ("day",)
+    keys: ClassVar[dict[str, str]] = {"day": "day"}
     _gate_checks = (
         GateCheck(
             check_id="mjo_east_west",
             column="mjo_east_west_ratio",
-            lower=get_threshold("tier1.mjo.east_west_power_ratio_min"),
-            requirement=gate_requirement("tier1.mjo"),
-            tier=gate_tier("tier1.mjo"),
+            lower=Threshold(".east_west_power_ratio_min"),
+            block="tier1.mjo",
         ),
     )
 
@@ -1119,7 +1109,7 @@ class MJOGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        daily = complex_data_source.data["day"]
+        daily = complex_data_source.data[self.keys["day"]]
         cube = self._cube(daily, _day("pr"))
         with setup_esmvaltool_config_and_logging():
             cube = extract_region(

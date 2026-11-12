@@ -61,7 +61,7 @@ from climateeval.diags.simple import (
 
 from climatebench2 import scoring, windows
 from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import gate_requirement
+from climatebench2.diags.pass_fail import BlockTag
 from climatebench2.diags.tier1_physics import CB2ComplexDiagnostic
 
 logger = logger.opt(colors=True)
@@ -187,13 +187,38 @@ class InternalVariability(CB2ComplexDiagnostic):
     pass/fail row and can never touch the entry ticket.
     """
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
     #: Protocol standing (thresholds.yml), read rather than hard-coded. This
     #: diagnostic defines no ``_gate_checks``: it reports numbers only.
-    requirement: ClassVar[str] = gate_requirement("tier2.internal_variability")
+    requirement: ClassVar[str] = BlockTag("tier2.internal_variability")  # type: ignore[assignment]
+
+    def get_output(self, data: Any, data_information: Any) -> Any:  # noqa: ANN401
+        """Emit nothing when σ_int comes from the ensemble, not a control.
+
+        ``tier2.internal_variability.source`` is ``picontrol`` (default: this
+        diagnostic chops the control) or ``ensemble_spread`` (the scoring pass
+        takes σ_int from the between-member spread of the scored ensemble via
+        :func:`climatebench2.scoring.ensemble_spread_sigma`; there is no
+        control to read, so no rows are written here).
+        """
+        source = str(self._threshold("tier2.internal_variability.source", "picontrol"))
+        if source == "ensemble_spread":
+            logger.info(
+                f"Diagnostic '{self.name}': tier2.internal_variability.source is "
+                "'ensemble_spread'; sigma_int comes from the scored ensemble in the "
+                "scoring pass, so no piControl rows are emitted",
+            )
+            return self._empty_output()
+        if source != "picontrol":
+            msg = (
+                f"tier2.internal_variability.source must be 'picontrol' or "
+                f"'ensemble_spread', got '{source}'"
+            )
+            raise ValueError(msg)
+        return super().get_output(data, data_information)
 
     def _calculate_raw_output(self, complex_data_source: Any) -> dict[Any, Any]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         lengths = windows.window_lengths()
         min_chunks = int(get_threshold("tier2.internal_variability.min_chunks"))
         outputs: dict[str, float] = {

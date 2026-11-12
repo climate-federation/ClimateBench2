@@ -175,3 +175,33 @@ def test_internal_variability_chunks_the_control(
 def _raise_missing() -> None:
     msg = "not in this control"
     raise KeyError(msg)
+
+
+def test_internal_variability_skips_cleanly_for_the_ensemble_spread_source(caplog) -> None:  # noqa: ANN001
+    """CB-7: no piControl rows (and no missing-key warning) when the source is the ensemble."""
+    from climateeval.data import DataSourceInformation
+    from loguru import logger
+
+    from climatebench2._thresholds import use_thresholds
+    from climatebench2.diags.tier2_scores import InternalVariability
+
+    messages: list[str] = []
+    sink = logger.add(lambda m: messages.append(str(m)), level="INFO")
+    try:
+        info = DataSourceInformation(
+            name="m", category="model", institute="i", exp="amip", variant="r1",
+        )
+        diag = InternalVariability("internal_variability")
+        overlay = {"tier2": {"internal_variability": {"source": "ensemble_spread"}}}
+        with use_thresholds(overlay):
+            output = diag.get_output({"amip": None}, info)  # no picontrol at all
+    finally:
+        logger.remove(sink)
+    assert output.metrics is None
+    assert output.raw_output is None
+    assert any("ensemble_spread" in m for m in messages)
+
+    with use_thresholds({"tier2": {"internal_variability": {"source": "bogus"}}}), pytest.raises(
+        ValueError, match="must be 'picontrol' or 'ensemble_spread'",
+    ):
+        diag.get_output({}, info)

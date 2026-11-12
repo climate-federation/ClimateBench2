@@ -64,11 +64,12 @@ def test_packaged_protocol_data_is_importable() -> None:
 
 def test_tier1_gates_have_thresholds_wired() -> None:
     from climatebench2.diags import ECSGate, ENSOGate
+    from climatebench2.diags.pass_fail import resolved_checks
 
-    (ecs_check,) = ECSGate._gate_checks
+    (ecs_check,) = resolved_checks(ECSGate)
     assert (ecs_check.lower, ecs_check.upper) == (1.0, 7.0)
 
-    amp, ratio = ENSOGate._gate_checks
+    amp, ratio = resolved_checks(ENSOGate)
     assert (amp.lower, amp.upper) == (0.5, 1.4)
     assert ratio.lower == 1.5
     assert ratio.upper is None
@@ -81,12 +82,12 @@ TIER1_NON_GATE_DIAGNOSTICS = {"internal_variability"}
 
 def test_every_tier1_gate_carries_a_requirement_tag() -> None:
     """No gate may reach the scorecard without a Required/Extended/extra tag."""
-    from climatebench2.diags.pass_fail import REQUIREMENT_TAGS
+    from climatebench2.diags.pass_fail import REQUIREMENT_TAGS, resolved_checks
 
     for suite_name in ("ClimateBench2_TierI", "ClimateBench2_TierI_variability"):
         suite = Suite(_resolve_suite(suite_name))
         for diag_name, diag in suite._get_diagnostics().items():
-            checks = diag._gate_checks
+            checks = resolved_checks(diag)
             if diag_name in TIER1_NON_GATE_DIAGNOSTICS:
                 assert not checks, f"{diag_name} must emit no pass/fail row"
                 continue
@@ -127,6 +128,8 @@ def test_tier2_event_gates_moved_out_of_the_tier1_suite() -> None:
     assert "pinatubo" not in tier1
     assert "hemispheric_asymmetry" not in tier1
 
+    from climatebench2.diags.pass_fail import resolved_checks
+
     events = Suite(_resolve_suite("ClimateBench2_TierII_events"))._get_diagnostics()
     assert set(events) == {
         "realized_warming_level",
@@ -139,7 +142,7 @@ def test_tier2_event_gates_moved_out_of_the_tier1_suite() -> None:
     }
     for diag in events.values():
         assert diag._required_data_keys == ("historical",)
-        for check in diag._gate_checks:
+        for check in resolved_checks(diag):
             assert check.requirement == "diagnostic"
     assert "ClimateBench2_TierII_events" in DEFAULT_SUITES
 
