@@ -77,7 +77,7 @@ from climateeval.diags._utils import union
 
 from climatebench2 import physics, windows
 from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import GateCheck, gate_requirement, gate_tier
+from climatebench2.diags.pass_fail import BlockTag, GateCheck, Threshold
 from climatebench2.diags.tier1_physics import CB2ComplexDiagnostic, _filled, _mon
 from climatebench2.scoring_pass import SCALAR_SIGMA_OBS_SUFFIX
 
@@ -347,7 +347,7 @@ class RealizedWarmingLevel(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
 
     _required_data_keys = ("historical",)
     #: Protocol standing (thresholds.yml): reported numbers, never a gate.
-    requirement: ClassVar[str] = gate_requirement("tier2.warming_level")
+    requirement: ClassVar[str] = BlockTag("tier2.warming_level")  # type: ignore[assignment]
 
     def _series(self, data: CubeList | Dataset) -> tuple[np.ndarray, np.ndarray]:
         return self._annual_global_series_years(data, _mon("tas"))
@@ -448,16 +448,14 @@ class PinatuboResponseGate(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
         GateCheck(
             check_id="pinatubo_dimming",
             column="pinatubo_rsds_anom",
-            upper=get_threshold("tier2.pinatubo.rsds_anomaly_max"),
-            requirement=gate_requirement("tier2.pinatubo"),
-            tier=gate_tier("tier2.pinatubo"),
+            upper=Threshold(".rsds_anomaly_max"),
+            block="tier2.pinatubo",
         ),
         GateCheck(
             check_id="pinatubo_cooling",
             column="pinatubo_tas_anom",
-            upper=get_threshold("tier2.pinatubo.tas_anomaly_max"),
-            requirement=gate_requirement("tier2.pinatubo"),
-            tier=gate_tier("tier2.pinatubo"),
+            upper=Threshold(".tas_anomaly_max"),
+            block="tier2.pinatubo",
         ),
     )
 
@@ -533,23 +531,21 @@ class HemisphericAsymmetryGate(_GlobalMeanTasMixin, CB2ComplexDiagnostic):
         GateCheck(
             check_id="hemispheric_trend_asymmetry",
             column="nh_minus_sh_trend",
-            upper=get_threshold("tier2.hemispheric_asymmetry.nh_minus_sh_trend_max"),
-            requirement=gate_requirement("tier2.hemispheric_asymmetry"),
-            tier=gate_tier("tier2.hemispheric_asymmetry"),
+            upper=Threshold(".nh_minus_sh_trend_max"),
+            block="tier2.hemispheric_asymmetry",
         ),
         GateCheck(
             check_id="itcz_southward_shift",
             column="itcz_shift_deg_per_decade",
-            upper=get_threshold("tier2.hemispheric_asymmetry.itcz_shift_max"),
-            requirement=gate_requirement("tier2.hemispheric_asymmetry"),
-            tier=gate_tier("tier2.hemispheric_asymmetry"),
+            upper=Threshold(".itcz_shift_max"),
+            block="tier2.hemispheric_asymmetry",
         ),
     )
 
     @property
     def _era(self) -> tuple[int, int]:
         """Aerosol era (first, last year) from ``thresholds.yml``."""
-        era = get_threshold("tier2.hemispheric_asymmetry.era")
+        era = self._threshold("tier2.hemispheric_asymmetry.era")
         return (int(era[0]), int(era[1]))
 
     def _hemisphere_trend(
@@ -643,7 +639,7 @@ class _SeasonalCycleDiagnostic(ObservedScalarMixin, CB2ComplexDiagnostic):
 
     _required_data_keys = ("historical",)
     #: Protocol standing (thresholds.yml): reported numbers, never a gate.
-    requirement: ClassVar[str] = gate_requirement("tier2.seasonal")
+    requirement: ClassVar[str] = BlockTag("tier2.seasonal")  # type: ignore[assignment]
 
     def _window(self, cube: Cube) -> Cube:
         """The climatology window of the protocol, or the whole record."""
@@ -779,7 +775,7 @@ class _StratocumulusRegression(_SeasonalCycleDiagnostic):
 
     def _slopes(self, predictand: Cube, sst: Cube) -> dict[str, float]:
         """One slope per deck plus their mean, from two 12-month climatologies."""
-        decks = get_threshold("tier2.seasonal.stratocumulus_regions")
+        decks = self._threshold("tier2.seasonal.stratocumulus_regions")
         out: dict[str, float] = {}
         values: list[float] = []
         for deck, box in decks.items():

@@ -65,7 +65,7 @@ from climateeval.diags._base import DiagnosticOutput
 
 from climatebench2 import scoring
 from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import GateCheck, gate_requirement, gate_tier
+from climatebench2.diags.pass_fail import GateCheck, Threshold
 from climatebench2.diags.tier1_physics import (
     CB2ComplexDiagnostic,
     _cube_years_months,
@@ -298,14 +298,12 @@ class MidHoloceneMonsoonGate(CB2ComplexDiagnostic):
 
     _required_data_keys = ("midholocene", "picontrol")
 
-    _region = get_threshold("tier3.midholocene_monsoon.region")
     _gate_checks = (
         GateCheck(
             check_id="midholocene_monsoon",
             column="jjas_pr_anom_mmday",
-            lower=get_threshold("tier3.midholocene_monsoon.jjas_pr_anom_min"),
-            requirement=gate_requirement("tier3.midholocene_monsoon"),
-            tier=gate_tier("tier3.midholocene_monsoon"),
+            lower=Threshold(".jjas_pr_anom_min"),
+            block="tier3.midholocene_monsoon",
         ),
     )
 

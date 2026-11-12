@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from loguru import logger
 
-from climatebench2.diags.pass_fail import GateCheck, gate_metrics
+from climatebench2.diags.pass_fail import GateCheck, gate_metrics, resolved_checks
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -136,7 +136,7 @@ def gate_checks_for_schema(
     schema: str,
     schema_map: dict[str, str] | None = None,
 ) -> tuple[GateCheck, ...] | None:
-    """``_gate_checks`` of the diagnostic class that owns ``schema``.
+    """Resolved ``_gate_checks`` of the diagnostic class that owns ``schema``.
 
     ``None`` means the schema is not a CB2 suite entry at all (unknown
     diagnostic); an empty tuple means it is a known diagnostic with no gates
@@ -153,7 +153,7 @@ def gate_checks_for_schema(
     if class_path is None:
         return None
     cls = str_to_object(class_path)
-    return tuple(getattr(cls, "_gate_checks", ()))
+    return resolved_checks(cls)
 
 
 def _table_columns(con: Any, schema: str, table: str) -> set[str]:  # noqa: ANN401

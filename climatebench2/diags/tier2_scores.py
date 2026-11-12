@@ -61,7 +61,7 @@ from climateeval.diags.simple import (
 
 from climatebench2 import scoring, windows
 from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import gate_requirement
+from climatebench2.diags.pass_fail import BlockTag
 from climatebench2.diags.tier1_physics import CB2ComplexDiagnostic
 
 logger = logger.opt(colors=True)
@@ -190,7 +190,7 @@ class InternalVariability(CB2ComplexDiagnostic):
     _required_data_keys = ("picontrol",)
     #: Protocol standing (thresholds.yml), read rather than hard-coded. This
     #: diagnostic defines no ``_gate_checks``: it reports numbers only.
-    requirement: ClassVar[str] = gate_requirement("tier2.internal_variability")
+    requirement: ClassVar[str] = BlockTag("tier2.internal_variability")  # type: ignore[assignment]
 
     def _calculate_raw_output(self, complex_data_source: Any) -> dict[Any, Any]:
         picontrol = complex_data_source.data["picontrol"]

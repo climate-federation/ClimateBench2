@@ -29,8 +29,8 @@ apply" from "was not run" (no row at all).
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import ibis
 import numpy as np
@@ -43,7 +43,7 @@ from climateeval.diags._base import DiagnosticOutput
 from climateeval.diags.simple import Nino34
 from climateeval.exceptions import MissingDataError
 
-from climatebench2._thresholds import get_threshold
+from climatebench2._thresholds import _MISSING, get_threshold
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -124,6 +124,80 @@ def gate_tier(threshold_block: str) -> str:
     return str(tag)
 
 
+def effective_block(owner: Any, block: str | None) -> str | None:  # noqa: ANN401
+    """The ``thresholds.yml`` block ``owner`` reads in place of ``block``.
+
+    ``owner`` is a gate class or instance; its ``_threshold_block`` is either
+    a mapping ``{default block: replacement block}`` (a gate with several
+    blocks, e.g. ``ClosureGate``'s water- and atmospheric-energy budgets) or a
+    string that replaces every block the gate reads (a single-block gate).
+    Without ``_threshold_block``, ``block`` is returned unchanged.
+    """
+    spec = getattr(owner, "_threshold_block", None)
+    if spec is None or block is None:
+        return block
+    if isinstance(spec, str):
+        return spec
+    return spec.get(block, block)
+
+
+@dataclass(frozen=True)
+class Threshold:
+    """A lazy reference to a number in ``thresholds.yml``.
+
+    Accepted by :attr:`GateCheck.lower` / ``upper``; resolved by
+    :func:`resolved_checks` under the layer stack active *then*, never at
+    import. ``path`` is dotted from the root (``"tier1.ecs.range"``) or, when
+    it starts with ``"."``, **relative to the check's block**
+    (``".range"`` -> ``"<block>.range"``), so a gate that is repointed at
+    another block with ``_threshold_block`` reads the same keys there.
+    ``index`` picks one element of a list-valued threshold (a range).
+    """
+
+    path: str
+    index: int | None = None
+
+    def resolve(self, block: str | None = None) -> float:
+        """The concrete number, under the active threshold layers."""
+        path = self.path
+        if path.startswith("."):
+            if block is None:
+                msg = f"Relative threshold '{path}' needs a GateCheck.block"
+                raise ValueError(msg)
+            path = block + path
+        value = get_threshold(path)
+        if self.index is not None:
+            value = value[self.index]
+        return float(value)
+
+
+@dataclass(frozen=True)
+class Band:
+    """One edge of a ``reference ± tolerance`` band, from two thresholds.
+
+    ``relative=True``: ``reference * (1 ∓ tolerance)``; otherwise
+    ``reference ∓ tolerance``. ``side`` is ``"lower"`` or ``"upper"``.
+    """
+
+    reference: Threshold
+    tolerance: Threshold
+    side: Literal["lower", "upper"]
+    relative: bool = True
+
+    def resolve(self, block: str | None = None) -> float:
+        """The concrete edge, under the active threshold layers."""
+        ref = self.reference.resolve(block)
+        tol = self.tolerance.resolve(block)
+        sign = -1.0 if self.side == "lower" else 1.0
+        return ref * (1.0 + sign * tol) if self.relative else ref + sign * tol
+
+
+def _resolve_bound(bound: Any, block: str | None) -> float | None:  # noqa: ANN401
+    if isinstance(bound, (Threshold, Band)):
+        return bound.resolve(block)
+    return bound
+
+
 @dataclass(frozen=True)
 class GateCheck:
     """One pass/fail check on a column of a diagnostic's raw output.
@@ -131,11 +205,17 @@ class GateCheck:
     ``statistic`` reduces the (time-ordered) series of ``column`` values for
     one data source to a scalar; ``None`` means the column already holds a
     scalar (one row per data source). Bounds are inclusive; ``None`` means
-    unbounded on that side. ``requirement`` is the protocol standing of the
-    check (:data:`REQUIREMENT_TAGS`) and comes from
-    :func:`gate_requirement`; ``tier`` (:data:`TIER_TAGS`) is the protocol
-    tier it belongs to and comes from :func:`gate_tier`. Both are carried on
-    every gate row, and the leaderboard groups the scorecard by the pair.
+    unbounded on that side.
+
+    Nothing here is read from ``thresholds.yml`` until the gate is evaluated:
+    ``lower`` / ``upper`` are a float, ``None``, a :class:`Threshold` or a
+    :class:`Band`; ``block`` is the dotted path of the check's
+    ``thresholds.yml`` block (``"tier1.ecs"``), from which ``requirement``
+    (:data:`REQUIREMENT_TAGS`, via :func:`gate_requirement`) and ``tier``
+    (:data:`TIER_TAGS`, via :func:`gate_tier`) are resolved unless given
+    explicitly. :func:`resolved_checks` returns the concrete check; both tags
+    are carried on every gate row, and the leaderboard groups the scorecard by
+    the pair.
 
     ``annotate`` adds descriptive columns to the gate row: it receives the
     data source's raw-output rows and returns ``{column: str}`` — e.g. I.3c's
@@ -147,11 +227,88 @@ class GateCheck:
     check_id: str
     column: str
     statistic: Callable[[pd.Series], float] | None = None
-    lower: float | None = None
-    upper: float | None = None
-    requirement: str = DEFAULT_REQUIREMENT
-    tier: str = DEFAULT_TIER
+    lower: float | Threshold | Band | None = None
+    upper: float | Threshold | Band | None = None
+    requirement: str | None = None
+    tier: str | None = None
     annotate: Callable[[pd.DataFrame], dict[str, str]] | None = None
+    block: str | None = None
+
+    def resolve(self, owner: Any = None) -> GateCheck:  # noqa: ANN401
+        """This check with concrete bounds, ``requirement`` and ``tier``.
+
+        ``owner`` (a gate class or instance) supplies ``_threshold_block``.
+        Resolving an already-resolved check returns an equal check.
+        """
+        block = effective_block(owner, self.block)
+        requirement = self.requirement
+        if requirement is None:
+            requirement = (
+                DEFAULT_REQUIREMENT if block is None else gate_requirement(block)
+            )
+        tier = self.tier
+        if tier is None:
+            tier = DEFAULT_TIER if block is None else gate_tier(block)
+        return replace(
+            self,
+            lower=_resolve_bound(self.lower, block),
+            upper=_resolve_bound(self.upper, block),
+            requirement=requirement,
+            tier=tier,
+            block=block,
+        )
+
+
+def resolved_checks(owner: Any) -> tuple[GateCheck, ...]:  # noqa: ANN401
+    """The ``_gate_checks`` of a gate class or instance, bounds made concrete.
+
+    Evaluated under the active threshold layer stack and the owner's
+    ``_threshold_block``; call it at evaluation time, never at import.
+    """
+    return tuple(
+        check.resolve(owner) for check in getattr(owner, "_gate_checks", ())
+    )
+
+
+class BlockTag:
+    """Class attribute resolving a block's ``requirement`` or ``tier`` lazily.
+
+    ``requirement = BlockTag("tier2.internal_variability")`` reads as the
+    string tag (``Cls.requirement == "diagnostic"``) but evaluates under the
+    layer stack active at access time, and follows ``_threshold_block``.
+    """
+
+    def __init__(self, block: str, what: Literal["requirement", "tier"] = "requirement") -> None:
+        """Remember the block and which tag to read."""
+        self._block = block
+        self._what = what
+
+    def __get__(self, instance: Any, owner: type | None = None) -> str:  # noqa: ANN401
+        """Resolve the tag now."""
+        block = effective_block(owner if instance is None else instance, self._block)
+        assert block is not None  # noqa: S101 - self._block is a str
+        return gate_requirement(block) if self._what == "requirement" else gate_tier(block)
+
+
+class ThresholdBlockMixin:
+    """``_threshold_block`` and ``_threshold`` for a diagnostic that has gates.
+
+    ``_threshold_block`` points the diagnostic at another ``thresholds.yml``
+    block without redefining its checks (see :func:`effective_block`):
+    ``{"tier1.water_budget": "amip.water_budget"}`` for several blocks, or a
+    plain string for a gate with one.
+    """
+
+    _threshold_block: ClassVar[str | dict[str, str] | None] = None
+
+    def _threshold(self, path: str, default: Any = _MISSING) -> Any:  # noqa: ANN401
+        """``get_threshold`` of the gate's own block, honouring ``_threshold_block``.
+
+        ``path`` is the CB2 path (``"tier1.ecs.n_years"``); its block (all
+        but the last element) is mapped through :func:`effective_block`.
+        """
+        block, _, key = path.rpartition(".")
+        return get_threshold(f"{effective_block(self, block)}.{key}", default)
 
 
 def _gate_row(check: GateCheck, **fields: Any) -> dict[str, Any]:
@@ -172,7 +329,13 @@ def gate_metrics(
     *,
     time_column: str = "time",
 ) -> pd.DataFrame:
-    """Evaluate ``checks`` per data source of a raw-output DataFrame."""
+    """Evaluate ``checks`` per data source of a raw-output DataFrame.
+
+    Checks still holding lazy bounds are resolved here, under the active
+    layer stack; pass :func:`resolved_checks` of a gate to honour its
+    ``_threshold_block``.
+    """
+    checks = tuple(check.resolve() for check in checks)
     rows: list[dict[str, Any]] = []
     group_cols = [c for c in ("data_id", "data_type") if c in raw_df.columns]
     for keys, group in raw_df.groupby(group_cols, sort=False):
@@ -220,6 +383,7 @@ def not_applicable_metrics(
     — neither a pass nor a fail (paper §7.1). Nothing is computed, so this
     needs no data at all.
     """
+    checks = tuple(check.resolve() for check in checks)
     return pd.DataFrame(
         [
             {
@@ -295,7 +459,7 @@ def _gate_attribute(attribute: str) -> dict[str, str]:
 
     values: dict[str, str] = {}
     for name in diags.__all__:
-        for check in getattr(getattr(diags, name), "_gate_checks", ()):
+        for check in resolved_checks(getattr(diags, name)):
             if isinstance(check, GateCheck):
                 values[check.check_id] = getattr(check, attribute)
     return values
@@ -311,7 +475,7 @@ def gate_tiers() -> dict[str, str]:
     return _gate_attribute("tier")
 
 
-class GateMixin:
+class GateMixin(ThresholdBlockMixin):
     """Mixin appending ``_gate_checks`` results to any diagnostic's output.
 
     Two class-level switches, set for a whole run by
@@ -361,7 +525,7 @@ class GateMixin:
 
     def _gated_output(self, data: Any, data_information: Any) -> DiagnosticOutput:
         output = super().get_output(data, data_information)  # type: ignore[misc]
-        return apply_gate(output, self._gate_checks)
+        return apply_gate(output, resolved_checks(self))
 
 
 @contextmanager
@@ -421,7 +585,7 @@ class SupersetExperimentMixin:
 
     def _not_applicable_output(self, data_information: Any) -> DiagnosticOutput:
         """Gate rows marking every check of this diagnostic as N/A."""
-        checks: tuple[GateCheck, ...] = getattr(self, "_gate_checks", ())
+        checks = resolved_checks(self)
         rows = not_applicable_metrics(checks, data_id=data_information.id)
         return DiagnosticOutput(
             raw_output=None,
@@ -526,27 +690,22 @@ def band_power_ratio(
 
 
 def _enso_checks(column: str) -> tuple[GateCheck, ...]:
-    amp_lo, amp_hi = get_threshold("tier1.enso.amplitude_range")
-    ratio_min = get_threshold("tier1.enso.band_power_ratio_min")
-    requirement = gate_requirement("tier1.enso")
-    tier = gate_tier("tier1.enso")
+    """The two ENSO checks on ``column``; bounds resolve at evaluation time."""
     return (
         GateCheck(
             check_id="enso_amplitude",
             column=column,
             statistic=lambda s: float(s.std(ddof=1)),
-            lower=amp_lo,
-            upper=amp_hi,
-            requirement=requirement,
-            tier=tier,
+            lower=Threshold(".amplitude_range", 0),
+            upper=Threshold(".amplitude_range", 1),
+            block="tier1.enso",
         ),
         GateCheck(
             check_id="enso_spectral_ratio",
             column=column,
             statistic=band_power_ratio,
-            lower=ratio_min,
-            requirement=requirement,
-            tier=tier,
+            lower=Threshold(".band_power_ratio_min"),
+            block="tier1.enso",
         ),
     )
 

@@ -96,11 +96,12 @@ def test_tier3_diagnostics_importable_and_wired() -> None:
     climateeval = pytest.importorskip("climateeval")  # noqa: F841
 
     from climatebench2.diags import MidHoloceneMonsoonGate, PaleoProxyScore
+    from climatebench2.diags.pass_fail import resolved_checks
     from climatebench2.diags.tier1_physics import CB2ComplexDiagnostic
 
     assert issubclass(MidHoloceneMonsoonGate, CB2ComplexDiagnostic)
     assert issubclass(PaleoProxyScore, CB2ComplexDiagnostic)
-    (check,) = MidHoloceneMonsoonGate._gate_checks
+    (check,) = resolved_checks(MidHoloceneMonsoonGate)
     assert check.lower == 0.5  # mm/day, tier3.midholocene_monsoon
     # The monsoon gate is a TIER III Extended check, not a Tier I one: that
     # tag is what keeps it out of the Tier I table on the scorecard.

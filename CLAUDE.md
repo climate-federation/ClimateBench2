@@ -60,6 +60,13 @@ climatebench2/
 
 ## Key integration facts
 
+- **No threshold is read at import or class-definition time** (the layer stack in
+  `_thresholds.py` can change after import). A gate's `_gate_checks` hold lazy
+  `Threshold(".range", 0)` / `Band(...)` bounds and a `GateCheck.block`; `requirement`
+  and `tier` come from the block. Always go through `pass_fail.resolved_checks(cls_or_instance)`
+  for concrete numbers. `_threshold_block` (a string, or `{block: other_block}`) repoints a
+  gate at another thresholds block; inside methods read the gate's own block with
+  `self._threshold("tier1.x.key")` so the repoint is honoured. `tests/test_gate_lazy_bounds.py` guards it.
 - ClimateEval's `Suite` loads any importable `diagnostic:` class path (`str_to_object`);
   a CB2 diagnostic need only subclass `climateeval.diags._base.Diagnostic`.
 - Where ClimateEval already computes the quantity (ECS, land-ocean warming ratio,

@@ -447,7 +447,7 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
         "exp": list(STAGED_EXP_FACET),
         "dataset": "*",
         "institute": "*",
-        "ensemble": get_threshold("tier2.comparison_ensemble.member_pattern"),
+        "ensemble": "*",  # the instance narrows it to the protocol's member pattern
         "grid": "*",
         "timerange": "19790101/*",
     }
@@ -455,6 +455,11 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
     def __init__(self, data_root_dir: Path | str | None = None) -> None:
         """Remember an explicit root (ClimateEval instantiates with none)."""
         self._data_root_dir = data_root_dir
+        # Read at instantiation, not at import: the threshold layers can change.
+        self.esmvaltool_dataset_facets = {
+            **type(self).esmvaltool_dataset_facets,
+            "ensemble": get_threshold("tier2.comparison_ensemble.member_pattern"),
+        }
 
     def generate(
         self,

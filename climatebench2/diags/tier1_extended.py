@@ -36,8 +36,7 @@ from esmvalcore.preprocessor import (
 from loguru import logger
 
 from climatebench2 import physics, windows
-from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import GateCheck, gate_requirement, gate_tier
+from climatebench2.diags.pass_fail import GateCheck, Threshold
 from climatebench2.diags.tier1_physics import (
     CB2ComplexDiagnostic,
     _cube_years_months,
@@ -179,9 +178,8 @@ class GeostrophicBalanceGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="geostrophic_balance",
             column="geostrophic_corr",
-            lower=get_threshold("tier1.geostrophic_balance.spatial_corr_min"),
-            requirement=gate_requirement("tier1.geostrophic_balance"),
-            tier=gate_tier("tier1.geostrophic_balance"),
+            lower=Threshold(".spatial_corr_min"),
+            block="tier1.geostrophic_balance",
         ),
     )
 
@@ -249,9 +247,8 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="gfmip_patch",
             column="delta_lambda",
-            lower=get_threshold("tier1.gfmip_patch.delta_lambda_min"),
-            requirement=gate_requirement("tier1.gfmip_patch"),
-            tier=gate_tier("tier1.gfmip_patch"),
+            lower=Threshold(".delta_lambda_min"),
+            block="tier1.gfmip_patch",
         ),
     )
 
@@ -299,10 +296,9 @@ class Amip4xCO2ERFGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="amip_4xco2_erf",
             column="erf_wm2",
-            lower=get_threshold("tier1.amip_4xco2_erf.range")[0],
-            upper=get_threshold("tier1.amip_4xco2_erf.range")[1],
-            requirement=gate_requirement("tier1.amip_4xco2_erf"),
-            tier=gate_tier("tier1.amip_4xco2_erf"),
+            lower=Threshold(".range", 0),
+            upper=Threshold(".range", 1),
+            block="tier1.amip_4xco2_erf",
         ),
     )
 
@@ -376,21 +372,18 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
     _ts_reference: ClassVar[type[DataSource]] = HadISST
     _pr_reference: ClassVar[type[DataSource]] = GPCP
 
-    _corr_min = get_threshold("tier1.enso.teleconnection_pattern_corr_min")
     _gate_checks = (
         GateCheck(
             check_id="enso_teleconnection_ts",
             column="teleconnection_corr_ts",
-            lower=_corr_min,
-            requirement=gate_requirement("tier1.enso"),
-            tier=gate_tier("tier1.enso"),
+            lower=Threshold(".teleconnection_pattern_corr_min"),
+            block="tier1.enso",
         ),
         GateCheck(
             check_id="enso_teleconnection_pr",
             column="teleconnection_corr_pr",
-            lower=_corr_min,
-            requirement=gate_requirement("tier1.enso"),
-            tier=gate_tier("tier1.enso"),
+            lower=Threshold(".teleconnection_pattern_corr_min"),
+            block="tier1.enso",
         ),
     )
 
@@ -508,7 +501,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
         """
         from climatebench2 import reference_windows
 
-        first, last = get_threshold("tier1.enso.teleconnection_obs_window")
+        first, last = self._threshold("tier1.enso.teleconnection_obs_window")
         product = source()
         timerange = reference_windows.clip_to_source(
             windows.timerange(int(first), int(last)),
@@ -554,7 +547,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
         if observed is None:
             return self._scalar_outputs(values)
 
-        first, last = get_threshold("tier1.enso.teleconnection_obs_window")
+        first, last = self._threshold("tier1.enso.teleconnection_obs_window")
         values["teleconnection_obs_first_year"] = float(first)
         values["teleconnection_obs_last_year"] = float(last)
         for name in ("ts", "pr"):
@@ -687,19 +680,17 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="precip_buoyancy",
             column="precip_buoyancy_slope_rel_error",
-            upper=get_threshold("tier1.precip_buoyancy.rel_tolerance_vs_obs"),
-            requirement=gate_requirement("tier1.precip_buoyancy"),
-            tier=gate_tier("tier1.precip_buoyancy"),
+            upper=Threshold(".rel_tolerance_vs_obs"),
             annotate=_precip_buoyancy_reference_source,
+            block="tier1.precip_buoyancy",
         ),
     )
 
     # -- the window and the column integral ---------------------------------
 
-    @staticmethod
-    def _protocol_years() -> tuple[int, int]:
+    def _protocol_years(self) -> tuple[int, int]:
         """``tier1.precip_buoyancy.obs_window`` as (first, last) year."""
-        first, last = get_threshold("tier1.precip_buoyancy.obs_window")
+        first, last = self._threshold("tier1.precip_buoyancy.obs_window")
         return int(first), int(last)
 
     def _model_cube(self, data: CubeList | Dataset, name: str) -> Cube:
@@ -1029,7 +1020,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
             )
         else:
             return reference, True, model, used, dropped
-        stored = get_threshold("tier1.precip_buoyancy.reference_slope")
+        stored = self._threshold("tier1.precip_buoyancy.reference_slope")
         if stored is None:
             logger.warning(
                 f"Diagnostic '{self.name}': tier1.precip_buoyancy."
@@ -1109,9 +1100,8 @@ class MJOGate(CB2ComplexDiagnostic):
         GateCheck(
             check_id="mjo_east_west",
             column="mjo_east_west_ratio",
-            lower=get_threshold("tier1.mjo.east_west_power_ratio_min"),
-            requirement=gate_requirement("tier1.mjo"),
-            tier=gate_tier("tier1.mjo"),
+            lower=Threshold(".east_west_power_ratio_min"),
+            block="tier1.mjo",
         ),
     )
 

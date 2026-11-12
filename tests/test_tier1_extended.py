@@ -442,16 +442,17 @@ def test_precip_buoyancy_pairs_each_level_with_its_own_pressure() -> None:
 
 def _stored_reference_slope(monkeypatch: pytest.MonkeyPatch, stored: float | None) -> None:
     """Replace ``tier1.precip_buoyancy.reference_slope`` for one test."""
-    from climatebench2.diags import tier1_extended
+    from climatebench2.diags import pass_fail
 
-    real = tier1_extended.get_threshold
+    real = pass_fail.get_threshold
 
-    def thresholds(path: str):  # noqa: ANN202
+    def thresholds(path: str, *default):  # noqa: ANN002, ANN202
         if path == "tier1.precip_buoyancy.reference_slope":
             return stored
-        return real(path)
+        return real(path, *default)
 
-    monkeypatch.setattr(tier1_extended, "get_threshold", thresholds)
+    # `GateMixin._threshold` (the gate's own block) reads through pass_fail
+    monkeypatch.setattr(pass_fail, "get_threshold", thresholds)
 
 
 def test_precip_buoyancy_stored_fallback_is_the_ratified_value() -> None:
