@@ -305,6 +305,46 @@ def test_chunked_statistic_std_mean_and_trend() -> None:
         scoring.chunked_statistic_std(series, 50, "median")
 
 
+def test_ensemble_spread_sigma_mean_is_the_between_member_std() -> None:
+    members = np.array([[1.0, 3.0], [2.0, 4.0], [5.0, 7.0], [0.0, 2.0]])  # means 2,3,6,1
+    expected = np.std([2.0, 3.0, 6.0, 1.0], ddof=1)
+    assert scoring.ensemble_spread_sigma(members, "mean") == pytest.approx(expected)
+
+
+def test_ensemble_spread_sigma_trend_is_the_std_of_member_slopes() -> None:
+    t = np.arange(10.0)
+    slopes = np.array([0.1, 0.3, 0.2, 0.6])
+    members = slopes[:, None] * t[None, :] + np.array([5.0, -1.0, 2.0, 0.0])[:, None]
+    assert scoring.ensemble_spread_sigma(members, "trend") == pytest.approx(
+        np.std(slopes, ddof=1),
+    )
+
+
+def test_ensemble_spread_sigma_needs_three_members() -> None:
+    two = np.random.default_rng(0).normal(size=(2, 20))
+    assert np.isnan(scoring.ensemble_spread_sigma(two, "mean"))
+    assert np.isnan(scoring.ensemble_spread_sigma(two, "trend"))
+    three = np.random.default_rng(0).normal(size=(3, 20))
+    assert np.isfinite(scoring.ensemble_spread_sigma(three, "mean"))
+
+
+def test_ensemble_spread_sigma_ignores_nans_and_drops_empty_members() -> None:
+    members = np.array([[1.0, np.nan, 3.0], [2.0, 4.0, np.nan], [np.nan] * 3, [5.0, 7.0, 6.0]])
+    # member means 2, 3, (dropped), 6
+    assert scoring.ensemble_spread_sigma(members, "mean") == pytest.approx(
+        np.std([2.0, 3.0, 6.0], ddof=1),
+    )
+    # only two members left with a usable value -> not an estimate
+    assert np.isnan(scoring.ensemble_spread_sigma(members[:3], "mean"))
+
+
+def test_ensemble_spread_sigma_rejects_bad_input() -> None:
+    with pytest.raises(ValueError, match="Unknown statistic"):
+        scoring.ensemble_spread_sigma(np.zeros((4, 5)), "median")
+    with pytest.raises(ValueError, match="2-D"):
+        scoring.ensemble_spread_sigma(np.zeros(5), "mean")
+
+
 # ---------------------------------------------------------------------------
 # Ensemble consistency
 # ---------------------------------------------------------------------------

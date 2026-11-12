@@ -352,6 +352,43 @@ def chunked_statistic_std(
     return float(np.std(values, ddof=1))
 
 
+def ensemble_spread_sigma(members: np.ndarray, statistic: str) -> float:
+    """Internal-variability σ of a statistic from the ensemble's own spread.
+
+    ``members`` is a ``members x time`` array (one global series per
+    ensemble member over the scored window). The statistic — ``"mean"`` (the
+    window mean) or ``"trend"`` (OLS slope per step, as in
+    :func:`chunked_statistic_std`) — is evaluated per member and the result
+    is the **between-member** standard deviation (``ddof=1``). Non-finite
+    values are ignored within a member; a member with no finite value (or,
+    for the trend, fewer than two) is dropped. Fewer than 3 usable members
+    give ``nan``: a spread from two members is not an estimate.
+
+    This is the ``ensemble_spread`` source of
+    ``tier2.internal_variability.source`` (an AMIP ensemble has no piControl
+    to chop into chunks).
+    """
+    if statistic not in ("mean", "trend"):
+        msg = f"Unknown statistic '{statistic}'"
+        raise ValueError(msg)
+    x = np.asarray(members, dtype=float)
+    if x.ndim != 2:  # noqa: PLR2004 - members x time
+        msg = f"members must be a 2-D (members x time) array, got shape {x.shape}"
+        raise ValueError(msg)
+    t = np.arange(x.shape[1], dtype=float)
+    values: list[float] = []
+    for series in x:
+        mask = np.isfinite(series)
+        if statistic == "mean":
+            if mask.any():
+                values.append(float(series[mask].mean()))
+        elif mask.sum() >= 2:  # noqa: PLR2004 - a slope needs two points
+            values.append(float(stats.linregress(t[mask], series[mask]).slope))
+    if len(values) < 3:  # noqa: PLR2004 - minimum ensemble for a spread
+        return float("nan")
+    return float(np.std(values, ddof=1))
+
+
 def perkins_skill_score(pdf_model: np.ndarray, pdf_obs: np.ndarray) -> float:
     """Perkins skill score: the overlap of two binned distributions.
 

@@ -79,6 +79,9 @@ climatebench2/
   (`pass_fail.ExperimentKeysMixin`), so a subclass overrides `keys` only. `_UpstreamGate`
   wrappers also set `_upstream_keys` (role -> key upstream reads) and present upstream a view
   of the data under those keys. `optional_keys` lists non-required roles.
+- Optional switch `tier2.internal_variability.source` (`picontrol` default | `ensemble_spread`):
+  with `ensemble_spread`, `InternalVariability` emits nothing and the scoring pass takes
+  sigma_int from `scoring.ensemble_spread_sigma(members, statistic)` (NaN below 3 members).
 - Multi-experiment inputs follow the `ECS` `ComplexDiagnostic` pattern
   (`_required_data_keys` + `ComplexDataSource`). CB2 complex diagnostics accept a
   *superset* of their required keys so one experiment dict feeds a whole suite.

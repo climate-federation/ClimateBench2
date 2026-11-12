@@ -539,6 +539,11 @@ tier2:
     requirement: diagnostic            # a reported input, never a gate
     variables: [tas, pr, rsut, rlut, tos, prw, clt]
     min_chunks: 2                      # fewer -> no sigma_int for that window
+    # Optional switch (absent = picontrol; a protocol layer may set it):
+    #   source: picontrol | ensemble_spread
+    # ensemble_spread = sigma_int is the between-member std (>= 3 members) of the
+    # scored ensemble (scoring.ensemble_spread_sigma, called by the scoring pass);
+    # InternalVariability then emits no rows. Not part of the frozen fingerprint.
   # Pinatubo response (1991-07 .. 1993-12 vs the climatology_baseline_period
   # climatology above, i.e. 1985–2014)
   pinatubo:
