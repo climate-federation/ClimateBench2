@@ -29,6 +29,7 @@ from test_scoring_pass import (
     FAST,
     _eof_tables,
     _scalar_tables,
+    _sigma_internal_rows,
     _tables,
 )
 
@@ -800,3 +801,134 @@ def test_frozen_comparison_ignores_the_step_table(tmp_path) -> None:  # noqa: AN
             con.close()
 
     pd.testing.assert_frame_equal(steps_of(live), steps_of(run))
+
+
+# ---------------------------------------------------------------------------
+# CB-7 (scoring-pass half): σ_int from the ensemble's own spread
+# ---------------------------------------------------------------------------
+
+SPREAD = {"tier2": {"internal_variability": {"source": "ensemble_spread"}}}
+
+
+def _trend_row(rows: pd.DataFrame) -> pd.Series:
+    trend = rows[rows["var_id"] == "tas_trend_consistency"]
+    return trend[
+        (trend["data_id"] == "MyModel") & (trend["data_type"] == "to_benchmark")
+    ].iloc[0]
+
+
+def test_ensemble_spread_sigma_of_a_mean_and_a_trend() -> None:
+    members = np.array(
+        [
+            np.linspace(0.0, 1.0, 20),
+            np.linspace(0.0, 2.0, 20),
+            np.linspace(0.0, 4.0, 20),
+        ],
+    )
+    trends = np.array([scoring.ols_trend(m) for m in members])
+    assert scoring_pass._ensemble_spread_sigma(members, "trend") == pytest.approx(  # noqa: SLF001
+        trends.std(ddof=1),
+    )
+    means = members.mean(axis=1)
+    assert scoring_pass._ensemble_spread_sigma(members, "mean") == pytest.approx(  # noqa: SLF001
+        means.std(ddof=1),
+    )
+    # below three members there is no estimate, as with a missing piControl entry
+    assert scoring_pass._ensemble_spread_sigma(members[:2], "trend") == 0.0  # noqa: SLF001
+    with pytest.raises(ValueError, match="statistic"):
+        scoring_pass._ensemble_spread_sigma(members, "median")  # noqa: SLF001
+
+
+def test_the_default_source_is_picontrol_and_unchanged() -> None:
+    raw, sources = _tables(np.random.default_rng(24))
+    table = scoring_pass.internal_variability_from_raw(
+        _sigma_internal_rows(0.004),
+    )
+    kwargs = {"settings": FAST, "sigma_internal": table, "diagnostic": DIAGNOSTIC}
+    plain = pd.DataFrame(score_raw_output(raw, sources, **kwargs))
+    with use_thresholds({"tier2": {"internal_variability": {"source": "picontrol"}}}):
+        explicit = pd.DataFrame(score_raw_output(raw, sources, **kwargs))
+    pd.testing.assert_frame_equal(plain, explicit)
+    assert _trend_row(plain)["sigma_internal"] == pytest.approx(0.004)
+
+
+def test_ensemble_spread_mode_reports_the_spread_and_counts_it_once() -> None:
+    raw, sources = _tables(np.random.default_rng(24))
+    table = scoring_pass.internal_variability_from_raw(
+        _sigma_internal_rows(0.004),
+    )
+    with use_thresholds(SPREAD):
+        rows = pd.DataFrame(
+            score_raw_output(
+                raw,
+                sources,
+                settings=FAST,
+                sigma_internal=table,  # supplied, and ignored in this mode
+                diagnostic=DIAGNOSTIC,
+            ),
+        )
+    row = _trend_row(rows)
+    members, _obs, _years = _model_steps(raw, sources, "MyModel", "model")
+    # the 30 scored steps only (the anomaly cut drops the baseline years)
+    scored = members[:, -30:]
+    trends = np.array([scoring.ols_trend(m) for m in scored])
+    assert row["sigma_internal"] == pytest.approx(trends.std(ddof=1), rel=1e-6)
+    assert row["sigma_internal"] != pytest.approx(0.004)
+    # σ_total² = var(member trends) + σ_obs²: the spread is NOT added twice
+    assert row["total_sigma"] ** 2 == pytest.approx(
+        trends.var(ddof=1) + row["sigma_obs"] ** 2,
+        rel=1e-6,
+    )
+    assert row["total_sigma"] ** 2 < 2 * trends.var(ddof=1) + row["sigma_obs"] ** 2
+
+
+def test_ensemble_spread_mode_with_two_members_reports_no_sigma_int() -> None:
+    raw, sources = _tables(np.random.default_rng(24))
+    two = raw[~raw["data_id"].str.endswith("r3i1p1f1") | (raw["data_type"] != "to_benchmark")]
+    with use_thresholds(SPREAD):
+        rows = pd.DataFrame(
+            score_raw_output(two, sources, settings=FAST, diagnostic=DIAGNOSTIC),
+        )
+    row = _trend_row(rows)
+    assert row["n_members"] == 2
+    assert row["sigma_internal"] == 0.0
+    assert row["total_sigma"] > 0  # the test still runs on spread and σ_obs
+
+
+def test_ensemble_spread_mode_on_an_aggregated_scalar() -> None:
+    raw, sources = _scalar_tables(np.random.default_rng(52))
+    with use_thresholds(SPREAD):
+        rows = pd.DataFrame(
+            score_scalar_output(raw, sources, diagnostic="realized_warming_level"),
+        )
+    consistency = rows[
+        (rows["var_id"] == "gmst_warming_level_consistency")
+        & (rows["data_type"] == "to_benchmark")
+    ].iloc[0]
+    values = (
+        raw[raw["data_id"].str.startswith("model_MyModel")]["gmst_warming_level"]
+        .dropna()
+        .to_numpy()
+    )
+    assert consistency["sigma_internal"] == pytest.approx(values.std(ddof=1))
+    assert consistency["total_sigma"] ** 2 == pytest.approx(
+        values.var(ddof=1) + consistency["sigma_obs"] ** 2,
+    )
+
+
+def test_the_picontrol_rows_are_not_collected_in_ensemble_spread_mode(
+    synthetic_db,  # noqa: ANN001, F811
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    def boom(_paths):  # noqa: ANN001, ANN202
+        msg = "piControl σ_int must not be read"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(scoring_pass, "collect_internal_variability", boom)
+    with use_thresholds(SPREAD):
+        scoring_pass.score_databases([synthetic_db], settings=FAST)
+    with (
+        use_thresholds({"tier2": {"internal_variability": {"source": "nope"}}}),
+        pytest.raises(ValueError, match="source"),
+    ):
+        scoring_pass.internal_variability_source()

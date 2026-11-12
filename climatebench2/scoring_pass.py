@@ -253,6 +253,9 @@ _MIN_OVERLAP = 3
 #: Minimum members for a fair CRPS.
 _MIN_MEMBERS = 2
 
+#: Minimum members for an ensemble-spread σ_int (and for leave-one-out rows).
+_MIN_MEMBERS_FOR_SPREAD = 3
+
 #: Median monthly-step length used to tell a monthly series from an annual one.
 _MONTHLY_MAX_DAYS = 200
 
@@ -1149,6 +1152,56 @@ def _first_finite(series: pd.Series) -> float:
     return float(values.iloc[0]) if not values.empty else float("nan")
 
 
+#: ``tier2.internal_variability.source`` values.
+SIGMA_INT_PICONTROL = "picontrol"
+SIGMA_INT_ENSEMBLE_SPREAD = "ensemble_spread"
+
+
+def internal_variability_source() -> str:
+    """Where σ_int of the consistency test comes from.
+
+    ``tier2.internal_variability.source`` (optional): ``picontrol`` (default)
+    reads the piControl-derived ``InternalVariability`` rows;
+    ``ensemble_spread`` takes the between-member spread of the scored ensemble
+    itself (:func:`_ensemble_spread_sigma`), for a protocol with no control
+    run (AMIP). Read when the pass runs.
+    """
+    source = str(
+        get_threshold("tier2.internal_variability.source", SIGMA_INT_PICONTROL),
+    )
+    if source not in (SIGMA_INT_PICONTROL, SIGMA_INT_ENSEMBLE_SPREAD):
+        msg = (
+            "tier2.internal_variability.source must be 'picontrol' or "
+            f"'ensemble_spread', got '{source}'"
+        )
+        raise ValueError(msg)
+    return source
+
+
+def _ensemble_spread_sigma(members: np.ndarray, statistic: str) -> float:
+    """Between-member σ (ddof=1) of a statistic of an ensemble.
+
+    ``members`` is ``(n_members, n_time)``; ``statistic`` is ``"mean"`` (the
+    window mean) or ``"trend"`` (OLS slope per step), evaluated per member.
+    Fewer than three members with a finite statistic give 0.0 — "no σ_int
+    available", exactly as when the piControl table has no entry — because a
+    standard deviation from two values has one degree of freedom.
+    """
+    ensemble = np.atleast_2d(np.asarray(members, dtype=float))
+    if statistic == "mean":
+        with np.errstate(all="ignore"):
+            values = np.array([np.nanmean(row) if np.isfinite(row).any() else np.nan for row in ensemble])
+    elif statistic == "trend":
+        values = np.array([scoring.ols_trend(row) for row in ensemble], dtype=float)
+    else:
+        msg = f"Unknown statistic '{statistic}' (expected 'mean' or 'trend')"
+        raise ValueError(msg)
+    values = values[np.isfinite(values)]
+    if values.size < _MIN_MEMBERS_FOR_SPREAD:
+        return 0.0
+    return float(values.std(ddof=1))
+
+
 def sigma_internal_for(
     table: SigmaInternal | None,
     var_id: str,
@@ -1884,7 +1937,7 @@ _STEP_COLUMNS: dict[str, str] = {
 
 #: Fewest members a model needs for leave-one-member-out rows (the ensemble
 #: left behind must still have the two members a fair CRPS needs).
-_MIN_MEMBERS_LEAVE_ONE_OUT = 3
+_MIN_MEMBERS_LEAVE_ONE_OUT = _MIN_MEMBERS_FOR_SPREAD
 
 
 def persist_steps_enabled() -> bool:
@@ -2060,15 +2113,25 @@ def _trend_consistency_row(
         return None
     obs_trend = scoring.ols_trend(obs)
     member_trends = np.array([scoring.ols_trend(row) for row in members], dtype=float)
-    sigma_int = sigma_internal_for(sigma_internal, column, "trend", n_time)
+    # In `ensemble_spread` mode σ_int IS the ensemble's own spread. The test's
+    # var(member trends) term already is that spread, so adding σ_int on top
+    # would count it twice (σ_total² = 2·var + σ_obs²): the spread is
+    # reported in `sigma_internal` but enters σ_total once.
+    spread_mode = internal_variability_source() == SIGMA_INT_ENSEMBLE_SPREAD
+    if spread_mode:
+        sigma_int = _ensemble_spread_sigma(members, "trend")
+        sigma_added = 0.0
+    else:
+        sigma_int = sigma_internal_for(sigma_internal, column, "trend", n_time)
+        sigma_added = sigma_int
     sigma_step = float(np.sqrt(np.mean(np.broadcast_to(obs_sigma, obs.shape) ** 2)))
     sigma_obs_trend = scoring.ols_trend_sigma(sigma_step, n_time)
-    if members.shape[0] < _MIN_MEMBERS and sigma_int <= 0.0 and sigma_obs_trend <= 0.0:
+    if members.shape[0] < _MIN_MEMBERS and sigma_added <= 0.0 and sigma_obs_trend <= 0.0:
         return None  # no spread at all: the test would divide by zero
     result = scoring.ensemble_consistency(
         member_trends,
         obs_trend,
-        sigma_internal=sigma_int,
+        sigma_internal=sigma_added,
         sigma_obs=sigma_obs_trend,
         p_threshold=float(get_threshold("tier2.consistency_p_value")),
     )
@@ -2652,12 +2715,19 @@ def _scalar_consistency_row(
     sigma_internal: SigmaInternal | None,
 ) -> dict[str, Any] | None:
     """Regime (c) for an aggregated scalar (metrics_reference.md §II.1)."""
-    sigma_int = _scalar_sigma_internal(sigma_internal, var_id)
+    if internal_variability_source() == SIGMA_INT_ENSEMBLE_SPREAD:
+        # The scalar is itself the window statistic; see `_trend_consistency_row`
+        # for why the spread is reported but not added to σ_total a second time.
+        sigma_int = _ensemble_spread_sigma(np.asarray(values, dtype=float)[:, None], "mean")
+        sigma_added = 0.0
+    else:
+        sigma_int = _scalar_sigma_internal(sigma_internal, var_id)
+        sigma_added = sigma_int
     try:
         result = scoring.ensemble_consistency(
             values,
             obs,
-            sigma_internal=sigma_int,
+            sigma_internal=sigma_added,
             sigma_obs=sigma_obs,
             p_threshold=float(get_threshold("tier2.consistency_p_value")),
         )
@@ -3405,7 +3475,12 @@ def score_databases(
     σ_int is collected from **all** of them first, so the Tier I database's
     piControl internal variability reaches the Tier II consistency test.
     """
-    sigma_internal = collect_internal_variability(db_paths)
+    # With `ensemble_spread` no piControl σ_int is read at all.
+    sigma_internal = (
+        collect_internal_variability(db_paths)
+        if internal_variability_source() == SIGMA_INT_PICONTROL
+        else {}
+    )
     return [
         score_database(path, settings=settings, sigma_internal=sigma_internal)
         for path in db_paths

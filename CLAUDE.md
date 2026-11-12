@@ -106,6 +106,10 @@ climatebench2/
   `frozen_comparison` ignores the table (its `_TABLES` is a fixed list).
   `scoring.paired_block_indices(n_steps, block_length, n_boot, seed)` gives seed-only
   moving-block draws to pair resamples across entries.
+- Optional `tier2.internal_variability.source` (`picontrol` default | `ensemble_spread`):
+  with `ensemble_spread` σ_int of the consistency test is the between-member std of the
+  scored statistic; it is *reported* in `sigma_internal` but not added to σ_total again
+  (the `var(members)` term is that spread), so σ_total² = var(members) + σ_obs².
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
   `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
   `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so
