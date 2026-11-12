@@ -272,6 +272,10 @@ def discover(model_root: Path, profile: dict[str, Any]) -> tuple[dict[str, Path]
     experiments = {
         key: model_root / name for name, key in profile["experiments"].items() if (model_root / name).is_dir()
     }
+    # `ensemble_as`: experiment keys that read the first ensemble member itself
+    # (the same output at another frequency, e.g. a daily `amip_day`).
+    for key in profile.get("ensemble_as") or ():
+        experiments.setdefault(key, next(iter(members.values())))
     return members, experiments
 
 
@@ -288,12 +292,17 @@ def _variant_key(path: Path) -> tuple[int, ...]:
 #: overlap, a single-member or observational-product ``reason`` row — none of
 #: which ever has one) and no ``E_ref``.
 UNSCORED_WHERE = (
-    "scorer = 'climatebench2' and crps is not null and e_ref is null "
+    "scorer = '{scorer}' and crps is not null and e_ref is null "
     "and data_type in ('to_benchmark', 'baseline')"
 )
 
+#: Profile defaults: ClimateBench2's own CLI, scorer tag and package. A
+#: protocol built on this machinery names its own in its profile (`cli`,
+#: `scorer`, `package`).
+DEFAULT_CLI = "climatebench2"
 
-def unscored_rows(out_dir: Path) -> list[dict[str, Any]]:
+
+def unscored_rows(out_dir: Path, scorer: str = DEFAULT_CLI) -> list[dict[str, Any]]:
     """Skill-bearing rows (submission, baselines) that ended without an ``E_ref``.
 
     Only rows the protocol scores against ``E_ref`` count: a row with a CRPS
@@ -316,7 +325,7 @@ def unscored_rows(out_dir: Path) -> list[dict[str, Any]]:
             for (schema,) in tables:
                 for var_id, n in con.sql(
                     f'select var_id, count(*) from "{schema}".metrics '  # noqa: S608
-                    f"where {UNSCORED_WHERE} group by var_id",
+                    f"where {UNSCORED_WHERE.format(scorer=scorer)} group by var_id",
                 ).fetchall():
                     rows.append({"suite": db.stem, "diagnostic": schema, "var_id": var_id, "rows": n})
         except duckdb.Error as err:
@@ -326,7 +335,7 @@ def unscored_rows(out_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def software_versions() -> dict[str, str]:
+def software_versions(package: str | None = None) -> dict[str, str]:
     versions = {"climateeval_commit": Path("/opt/climateeval/COMMIT").read_text().strip()
                 if Path("/opt/climateeval/COMMIT").exists() else "unknown"}
     # The package's own version, not importlib.metadata's: a stale editable
@@ -337,6 +346,12 @@ def software_versions() -> dict[str, str]:
         versions["climatebench2"] = climatebench2.__version__
     except Exception:  # noqa: BLE001
         versions["climatebench2"] = "unknown"
+    if package and package != "climatebench2":
+        # The protocol package scored under (profile key `package`).
+        try:
+            versions[package] = __import__(package).__version__
+        except Exception:  # noqa: BLE001
+            versions[package] = "unknown"
     versions["image"] = os.environ.get("CB2_IMAGE", "unknown")
     return versions
 
@@ -380,18 +395,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         "name": args.name,
         "profile": {k: v for k, v in profile.items() if not k.startswith("_")},
         "inputs": {"model_uri": args.model_uri},
-        "software": software_versions(),
+        "software": software_versions(profile.get("package")),
         "started": started.isoformat(),
     }
     status = 1
     try:
         refs_uri = args.references_uri or profile["references_uri"]
-        comp_uri = args.comparison_uri or profile["comparison_uri"]
+        # `cli` / `scorer` / `comparison`: ClimateBench2's unless the profile
+        # of a protocol built on this machinery says otherwise.
+        cli = profile.get("cli", DEFAULT_CLI)
+        scorer = profile.get("scorer", cli)
+        comparison_mode = profile.get("comparison", "frozen")
+        comp_uri = args.comparison_uri or profile.get("comparison_uri")
+        if comparison_mode == "frozen" and not comp_uri:
+            msg = "the profile scores against a frozen comparison but names no comparison_uri"
+            raise SystemExit(msg)
         record["inputs"] |= {"references_uri": refs_uri, "comparison_uri": comp_uri}
         refs = fetch(refs_uri, work / "references")
         if profile.get("verify_references", True) and not args.no_verify:
             log(f"verified {verify_manifest(refs)} reference files")
-        comparison = fetch(comp_uri, work / "comparison")
+        comparison = fetch(comp_uri, work / "comparison") if comparison_mode == "frozen" else None
         model = fetch(args.model_uri, work / "model", private=True)
 
         members, experiments = discover(model, profile)
@@ -402,13 +425,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         log(f"members: {', '.join(members)}; experiments: {', '.join(sorted(experiments)) or 'none'}")
 
         cmd = [
-            "climatebench2", "score", str(next(iter(members.values()))),
+            cli, "score", str(next(iter(members.values()))),
             "--name", args.name, "--institute", args.institute,
             "--data-root", str(refs),
-            "--comparison", "frozen", "--frozen-comparison", str(comparison),
-            "--timerange", profile["timerange"],
+            "--comparison", comparison_mode,
             "-o", str(out_dir),
         ]  # fmt: skip
+        if comparison is not None:
+            cmd += ["--frozen-comparison", str(comparison)]
+        if profile.get("timerange"):
+            cmd += ["--timerange", profile["timerange"]]
+        card = model / str(profile["model_card"]) if profile.get("model_card") else None
+        if card is not None and card.is_file():
+            cmd += ["--model-card", str(card)]
         for label, path in members.items():
             cmd += ["--member", f"{label}={path}"]
         for key, path in sorted(experiments.items()):
@@ -428,12 +457,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         dbs = sorted(str(p) for p in out_dir.glob("*.ddb"))
         if dbs:
             subprocess.run(
-                ["climatebench2", "leaderboard", *dbs, "-o", str(out_dir / "leaderboard.html")], check=False,
+                [cli, "leaderboard", *dbs, "-o", str(out_dir / "leaderboard.html")], check=False,
             )
             subprocess.run(
-                ["climatebench2", "leaderboard", *dbs, "--csv", str(out_dir / "scores.csv")], check=False,
+                [cli, "leaderboard", *dbs, "--csv", str(out_dir / "scores.csv")], check=False,
             )
-        record["unscored"] = unscored_rows(out_dir)
+        record["unscored"] = unscored_rows(out_dir, scorer)
         status = score.returncode
     except BaseException as err:  # noqa: BLE001 - always record and upload what exists
         record["error"] = repr(err)

@@ -300,3 +300,84 @@ def test_unscored_rows_lists_only_skill_rows_missing_e_ref(cb2_run, tmp_path) ->
             "rows": 2,
         },
     ]
+
+
+# -- a profile of another protocol ---------------------------------------------
+
+
+def test_a_profile_can_name_its_own_cli_scorer_and_comparison(
+    cb2_run, monkeypatch, tmp_path,  # noqa: ANN001
+) -> None:
+    """A protocol built on this machinery runs through the same runner."""
+    profile_dir = tmp_path / "profiles"
+    profile_dir.mkdir()
+    (profile_dir / "toy.yml").write_text(
+        "name: toy\n"
+        "cli: toybench\n"
+        "scorer: toybench\n"
+        "comparison: none\n"
+        "references_uri: REFS\n"
+        "results_uri: RESULTS\n"
+        "suites: [Toy_TierII]\n"
+        "experiments: {amip-p4K: amip_p4k}\n"
+        "ensemble_dir: amip\n"
+        "ensemble_as: [amip_day]\n"
+        "model_card: model_card.yml\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "work" / "model"
+    for member in ("r1i1p1f1", "r2i1p1f1"):
+        (model / "amip" / member).mkdir(parents=True)
+    (model / "amip-p4K").mkdir()
+    (model / "model_card.yml").write_text("model: Toy\n", encoding="utf-8")
+
+    fetched: list[str] = []
+
+    def fake_fetch(uri, dest, *, workers=16, private=False):  # noqa: ANN001, ANN202, ARG001
+        fetched.append(uri)
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        commands.append([str(part) for part in cmd])
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cb2_run, "fetch", fake_fetch)
+    monkeypatch.setattr(cb2_run, "upload", lambda _src, _uri: None)
+    monkeypatch.setattr(cb2_run, "PROFILE_DIR", profile_dir)
+    monkeypatch.setattr(cb2_run.subprocess, "run", fake_run)
+    status = cb2_run.main(
+        ["--model-uri=MODEL", "--name=Toy", "--profile=toy", f"--workdir={tmp_path / 'work'}", "--no-verify"],
+    )
+    assert status == 0
+    # No comparison bundle is fetched when the profile scores without one.
+    assert fetched == ["REFS", "MODEL"]
+    score = commands[0]
+    assert score[:2] == ["toybench", "score"]
+    assert score[score.index("--comparison") + 1] == "none"
+    assert "--frozen-comparison" not in score
+    assert "--timerange" not in score
+    assert score[score.index("--model-card") + 1].endswith("model_card.yml")
+    experiments = [score[i + 1] for i, part in enumerate(score) if part == "--experiment"]
+    assert any(e.startswith("amip_p4k=") for e in experiments)
+    # `ensemble_as`: the first member itself, under another key.
+    assert any(e.startswith("amip_day=") and e.endswith("r1i1p1f1") for e in experiments)
+
+
+def test_unscored_rows_follow_the_profiles_scorer(cb2_run, tmp_path) -> None:  # noqa: ANN001
+    import duckdb
+
+    con = duckdb.connect(str(tmp_path / "Suite.ddb"))
+    con.sql("create schema entry")
+    con.sql(
+        "create table entry.metrics (data_id varchar, data_type varchar, "
+        "var_id varchar, crps double, e_ref double, scorer varchar)",
+    )
+    con.sql("insert into entry.metrics values ('M', 'to_benchmark', 'tas', 0.4, null, 'toybench')")
+    con.close()
+    assert cb2_run.unscored_rows(tmp_path) == []
+    assert cb2_run.unscored_rows(tmp_path, "toybench") == [
+        {"suite": "Suite", "diagnostic": "entry", "var_id": "tas", "rows": 1},
+    ]
