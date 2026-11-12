@@ -102,11 +102,16 @@ STAGED_EXP = "historical-ssp245"
 #: ``esmvaltool_dataset_facets``).
 STAGED_EXP_FACET: tuple[str, ...] = ("historical", "ssp245")
 
-#: Directory name of one staged member:
+
+def _source_dir_re(staged_exp: str) -> re.Pattern[str]:
+    """Directory name of one staged member: ``CMIP6_<model>_<exp>_<member>``."""
+    return re.compile(
+        rf"^CMIP6_(?P<model>.+)_{re.escape(staged_exp)}_(?P<member>r\d+i\d+p\d+f\d+)$",
+    )
+
+
 #: ``CMIP6_<model>_historical-ssp245_<member>``.
-_SOURCE_DIR_RE = re.compile(
-    rf"^CMIP6_(?P<model>.+)_{STAGED_EXP}_(?P<member>r\d+i\d+p\d+f\d+)$",
-)
+_SOURCE_DIR_RE = _source_dir_re(STAGED_EXP)
 
 #: A variant label, ``r<realization>i<initialization>p<physics>f<forcing>``.
 _VARIANT_RE = re.compile(r"^r(\d+)i(\d+)p(\d+)f(\d+)$")
@@ -195,15 +200,18 @@ def staged_root(
     return root
 
 
-#: ``(root, frequency, var_name) -> [(model, member, files)]``. A Tier II suite
+#: ``(root, exp, frequency, var_name) -> [(model, member, files)]``. A Tier II suite
 #: instantiates ~7 diagnostics over ~10 variables and ClimateEval calls
 #: ``generate`` once per (diagnostic, variable), so without this the same
 #: directory walk — and the same few hundred ``Path.resolve()`` calls on
 #: symlinks into the pool — would run ~70 times per member set.
-_DISCOVERY_CACHE: dict[tuple[str, str, str], list[tuple[str, str, list[Path]]]] = {}
+_DISCOVERY_CACHE: dict[
+    tuple[str, str, str, str],
+    list[tuple[str, str, list[Path]]],
+] = {}
 
-#: ``root -> [(model, member, source_dir)]`` that pass the member policy.
-_MEMBER_CACHE: dict[str, list[tuple[str, str, Path]]] = {}
+#: ``(root, exp) -> [(model, member, source_dir)]`` that pass the member policy.
+_MEMBER_CACHE: dict[tuple[str, str], list[tuple[str, str, Path]]] = {}
 
 #: ``(root, model) -> institute``.
 _INSTITUTE_CACHE: dict[tuple[str, str], str] = {}
@@ -261,20 +269,24 @@ def _required_var_names(variable: Variable) -> list[str]:
         return [variable.var_name]
 
 
-def _ensemble_members(root: Path) -> list[tuple[str, str, Path]]:
+def _ensemble_members(
+    root: Path,
+    staged_exp: str = STAGED_EXP,
+) -> list[tuple[str, str, Path]]:
     """``[(model, member, source_dir)]`` of the comparison ensemble in ``root``.
 
-    Every ``CMIP6_<model>_historical-ssp245_<member>`` directory is grouped by
+    Every ``CMIP6_<model>_<staged_exp>_<member>`` directory is grouped by
     model and passed through :func:`select_members`, **before** any variable
     is looked at, so a model's members are the same for every variable.
     Sorted by directory name, the order the walk has always yielded.
     """
-    key = str(root)
+    key = (str(root), staged_exp)
     if key in _MEMBER_CACHE:
         return _MEMBER_CACHE[key]
+    source_dir_re = _SOURCE_DIR_RE if staged_exp == STAGED_EXP else _source_dir_re(staged_exp)
     by_model: dict[str, dict[str, Path]] = {}
     for source_dir in root.iterdir():
-        match = _SOURCE_DIR_RE.match(source_dir.name)
+        match = source_dir_re.match(source_dir.name)
         if match is None or not source_dir.is_dir():
             continue
         by_model.setdefault(match["model"], {})[match["member"]] = source_dir
@@ -293,14 +305,18 @@ def _ensemble_members(root: Path) -> list[tuple[str, str, Path]]:
     return members
 
 
-def _discover(root: Path, variable: Variable) -> list[tuple[str, str, list[Path]]]:
+def _discover(
+    root: Path,
+    variable: Variable,
+    staged_exp: str = STAGED_EXP,
+) -> list[tuple[str, str, list[Path]]]:
     """``[(model, member, files)]`` staged for one variable, cached per root."""
-    key = (str(root), variable.frequency, variable.var_name)
+    key = (str(root), staged_exp, variable.frequency, variable.var_name)
     if key in _DISCOVERY_CACHE:
         return _DISCOVERY_CACHE[key]
     var_names = _required_var_names(variable)
     found: list[tuple[str, str, list[Path]]] = []
-    for model, member, source_dir in _ensemble_members(root):
+    for model, member, source_dir in _ensemble_members(root, staged_exp):
         files: list[Path] = []
         for var_name in var_names:
             var_dir = source_dir / variable.frequency / var_name
@@ -428,8 +444,8 @@ def clear_discovery_cache() -> None:
     _INSTITUTE_CACHE.clear()
 
 
-class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
-    """CMIP6 historical+SSP2-4.5 comparison ensemble from a staged data root.
+class StagedCMIP6Ensemble(DataSourceGenerator):
+    """A CMIP6 comparison ensemble of one experiment, from a staged data root.
 
     Yields one :class:`StagedMemberDataSource` (an
     :class:`~climateeval.data._esmvaltool_intake.ESMValToolIntakeDataSource`)
@@ -437,49 +453,79 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
     (:func:`select_members`, applied per model before any variable is looked
     at) and actually carries the variable, with
 
-    * ``name`` = the model, ``category`` = ``CMIP6``, ``exp`` =
-      ``historical-ssp245``, ``variant`` = the member — i.e. the data source id
-      ``CMIP6_<model>_historical-ssp245_<member>``, the same id upstream's
-      :class:`climateeval.data.CMIP6HistoricalSSP245` produces, so
+    * ``name`` = the model, ``category`` = ``CMIP6``, ``exp`` = ``staged_exp``,
+      ``variant`` = the member — i.e. the data source id
+      ``CMIP6_<model>_<staged_exp>_<member>``, the same id upstream's generator
+      for that experiment produces (``CMIP6_<model>_historical-ssp245_<member>``
+      for :class:`climateeval.data.CMIP6HistoricalSSP245`), so
       :func:`climatebench2.scoring_pass.group_members` stacks the members of
       one model into one comparison ensemble;
     * ``esmvaltool_dataset_facets`` filled in, so a source that *is* missing
       locally can still be downloaded when ``--download`` is given.
+
+    Subclass it for another experiment by setting the class attributes::
+
+        class StagedCMIP6Amip(StagedCMIP6Ensemble):
+            staged_exp = "amip"
+            staged_exp_facet = ("amip",)
+
+    which reads directories named ``CMIP6_<model>_amip_<member>``.
     """
 
-    #: Facets of the ensemble this generator stands for. Not used for
-    #: discovery (that is the directory walk); they are what the yielded data
-    #: sources carry, and what a ``--download`` fallback would use.
-    esmvaltool_dataset_facets: ClassVar[dict[str, Any]] = {
-        "project": "CMIP6",
-        "exp": list(STAGED_EXP_FACET),
-        "dataset": "*",
-        "institute": "*",
-        "ensemble": get_threshold("tier2.comparison_ensemble.member_pattern"),
-        "grid": "*",
-        "timerange": "19790101/*",
-    }
+    #: ``exp`` of the staged record as :func:`climateeval.data._utils.facet_to_str`
+    #: renders ``staged_exp_facet`` (``["historical", "ssp245"]`` ->
+    #: ``historical-ssp245``). It is half of the data source id and the middle of
+    #: the staged directory name, so it must not drift from upstream's.
+    staged_exp: ClassVar[str] = STAGED_EXP
+
+    #: The ``exp`` facet list itself (what upstream puts in
+    #: ``esmvaltool_dataset_facets``).
+    staged_exp_facet: ClassVar[tuple[str, ...]] = STAGED_EXP_FACET
+
+    #: Environment variable naming the staged root; ``None`` is the active
+    #: protocol's ``staged_root_env`` (``CLIMATEBENCH2_STAGED_CMIP6_ROOT`` for
+    #: ClimateBench2).
+    staged_root_env: ClassVar[str | None] = None
 
     def __init__(self, data_root_dir: Path | str | None = None) -> None:
         """Remember an explicit root (ClimateEval instantiates with none)."""
         self._data_root_dir = data_root_dir
+
+    @classmethod
+    def dataset_facets(cls) -> dict[str, Any]:
+        """Facets of the ensemble this generator stands for.
+
+        Not used for discovery (that is the directory walk); they are what the
+        yielded data sources carry, and what a ``--download`` fallback would
+        use. Built per call, never at import: the member pattern is a
+        threshold, and the threshold stack can change after import.
+        """
+        return {
+            "project": "CMIP6",
+            "exp": list(cls.staged_exp_facet),
+            "dataset": "*",
+            "institute": "*",
+            "ensemble": get_threshold("tier2.comparison_ensemble.member_pattern"),
+            "grid": "*",
+            "timerange": "19790101/*",
+        }
 
     def generate(
         self,
         variable: Variable,
     ) -> Generator[ESMValToolIntakeDataSource]:
         """Yield one data source per staged member carrying ``variable``."""
-        root = staged_root(self._data_root_dir)
+        root = staged_root(self._data_root_dir, self.staged_root_env)
         if root is None:
             return
 
-        for model, member, files in _discover(root, variable):
+        for model, member, files in _discover(root, variable, self.staged_exp):
             institute_key = (str(root), model)
             if institute_key not in _INSTITUTE_CACHE:
                 _INSTITUTE_CACHE[institute_key] = _institute(files, model)
             institute = _INSTITUTE_CACHE[institute_key]
             facets: dict[str, Any] = {
-                **self.esmvaltool_dataset_facets,
+                **self.dataset_facets(),
                 "dataset": model,
                 "institute": institute or "*",
                 "ensemble": member,
@@ -493,7 +539,7 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
                 name=model,
                 category="CMIP6",
                 institute=institute,
-                exp=STAGED_EXP,
+                exp=self.staged_exp,
                 variant=member,
                 references=(
                     "https://www.wdc-climate.de/ui/cmip6?input=CMIP6.CMIP."
@@ -511,3 +557,15 @@ class StagedCMIP6HistoricalSSP245(DataSourceGenerator):
                     "_staged_root": root,
                 },
             )()
+
+
+class StagedCMIP6HistoricalSSP245(StagedCMIP6Ensemble):
+    """CMIP6 historical+SSP2-4.5 comparison ensemble from a staged data root.
+
+    ``CMIP6_<model>_historical-ssp245_<member>`` directories; data source ids
+    identical to :class:`climateeval.data.CMIP6HistoricalSSP245`, which stays
+    the documented alternative. See :class:`StagedCMIP6Ensemble`.
+    """
+
+    staged_exp = STAGED_EXP
+    staged_exp_facet = STAGED_EXP_FACET

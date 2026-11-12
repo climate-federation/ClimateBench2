@@ -51,9 +51,10 @@ climatebench2/
 ├── shared_sources.py    # reference + comparison ensemble loaded once for all members
 ├── frozen_comparison.py # freeze the CMIP6 comparison rows into a bundle; merge into a run
 ├── data/                # cmip6_staged.py (StagedCMIP6HistoricalSSP245: the ensemble behind
-│                        #   E_ref), imerg.py (daily pr), modis.py (clouds), ERF table (EBM),
+│                        #   E_ref; a StagedCMIP6Ensemble subclass with `staged_exp` stages another experiment), imerg.py (daily pr), modis.py (clouds), ERF table (EBM),
 │                        #   ocean_heat_content.py (thetao -> layer OHC on load; upstream candidate),
-│                        #   frequency.py (Amon/pr + day/pr: each entry its frequency; upstream candidate)
+│                        #   frequency.py (Amon/pr + day/pr: each entry its frequency; upstream candidate);
+│                        #   experiment -> frequency map is the protocol's
 ├── leaderboard/         # .ddb results -> scores table -> static HTML page
 ├── protocol.py          # Protocol plug-in: CB2_PROTOCOL, get_protocol/set_protocol/use_protocol; SuiteSpec,
 │                        #   SUITE_REGISTRY, DEFAULT_SUITES (re-exported by _cli)

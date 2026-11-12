@@ -53,7 +53,9 @@ _STEP_DAYS: tuple[tuple[float, str], ...] = (
 
 #: The frequency the experiment-shaped suites read each experiment at. Their
 #: complex diagnostics are monthly (``tier1_physics._mon``) except the ones
-#: reading the ``day`` experiment (``tier1_extended._day``).
+#: reading the ``day`` experiment (``tier1_extended._day``). This is
+#: ClimateBench2's map, the default of ``Protocol.experiment_frequency``; the
+#: active map is :func:`experiment_frequency`'s.
 EXPERIMENT_FREQUENCY: dict[str, str] = {"day": "day"}
 DEFAULT_EXPERIMENT_FREQUENCY = "mon"
 
@@ -190,5 +192,11 @@ def select_for_entry(data: Any, entry: Mapping[str, Any]) -> Any:
 
 
 def experiment_frequency(key: str) -> str:
-    """Return the frequency an experiment-shaped suite reads ``key`` at."""
-    return EXPERIMENT_FREQUENCY.get(key, DEFAULT_EXPERIMENT_FREQUENCY)
+    """Return the frequency an experiment-shaped suite reads ``key`` at.
+
+    From the active protocol's ``experiment_frequency`` (so a protocol can
+    declare that ``amip_day`` is daily); keys it does not list are monthly.
+    """
+    from climatebench2.protocol import get_protocol  # noqa: PLC0415
+
+    return get_protocol().experiment_frequency.get(key, DEFAULT_EXPERIMENT_FREQUENCY)

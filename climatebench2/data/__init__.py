@@ -9,7 +9,10 @@ Model output and observations never live here — they come from ClimateEval
 DataSources (docs/climateeval_delineation_plan.md, the ownership test). Five
 things that do:
 
-* :class:`~climatebench2.data.cmip6_staged.StagedCMIP6HistoricalSSP245` — a
+* :class:`~climatebench2.data.cmip6_staged.StagedCMIP6HistoricalSSP245` (a
+  subclass of :class:`~climatebench2.data.cmip6_staged.StagedCMIP6Ensemble`,
+  whose ``staged_exp`` / ``staged_exp_facet`` / ``staged_root_env`` class
+  attributes let a sibling benchmark stage another experiment, e.g. amip) — a
   *discovery policy*, not data: it finds the CMIP6 historical+SSP2-4.5
   comparison ensemble in a pre-staged root instead of globbing the pool, and
   applies the protocol's member policy and member cap itself
@@ -41,6 +44,7 @@ things that do:
 
 from climatebench2.data.cmip6_staged import (
     STAGED_ROOT_ENV,
+    StagedCMIP6Ensemble,
     StagedCMIP6HistoricalSSP245,
     staged_root,
 )
@@ -52,6 +56,7 @@ __all__ = [
     "IMERG",
     "MODIS",
     "STAGED_ROOT_ENV",
+    "StagedCMIP6Ensemble",
     "StagedCMIP6HistoricalSSP245",
     "layer_heat_content",
     "staged_root",

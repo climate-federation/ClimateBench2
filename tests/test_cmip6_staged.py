@@ -373,3 +373,107 @@ def test_the_generator_applies_the_policy_before_variable_availability(
         assert members("siconc") == first_ten - {"r3i1p1f1"}
     finally:
         clear_discovery_cache()
+
+
+# ---------------------------------------------------------------------------
+# StagedCMIP6Ensemble: the staged experiment label is a class attribute (CB-10)
+# ---------------------------------------------------------------------------
+
+
+def _stage_tree(root, source_ids: list[str], var_name: str = "tas") -> None:  # noqa: ANN001
+    for source_id in source_ids:
+        var_dir = root / source_id / "mon" / var_name
+        var_dir.mkdir(parents=True)
+        (var_dir / f"{var_name}_Amon_X_amip_r1i1p1f1_gn_197901-201412.nc").touch()
+
+
+def test_historical_ssp245_is_an_ensemble_subclass_with_the_old_constants() -> None:
+    from climatebench2.data import StagedCMIP6Ensemble
+    from climatebench2.data.cmip6_staged import STAGED_EXP, STAGED_EXP_FACET
+
+    assert issubclass(StagedCMIP6HistoricalSSP245, StagedCMIP6Ensemble)
+    assert StagedCMIP6HistoricalSSP245.staged_exp == STAGED_EXP == "historical-ssp245"
+    assert StagedCMIP6HistoricalSSP245.staged_exp_facet == STAGED_EXP_FACET
+    assert StagedCMIP6Ensemble.staged_exp == "historical-ssp245"
+    assert StagedCMIP6HistoricalSSP245.dataset_facets()["exp"] == ["historical", "ssp245"]
+
+
+def test_amip_subclass_reads_amip_directories_only(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from climatebench2.data import StagedCMIP6Ensemble
+
+    class StagedCMIP6Amip(StagedCMIP6Ensemble):
+        staged_exp = "amip"
+        staged_exp_facet = ("amip",)
+
+    _stage_tree(
+        tmp_path,
+        [
+            "CMIP6_MPI-ESM1-2-LR_amip_r1i1p1f1",
+            "CMIP6_MPI-ESM1-2-LR_amip_r2i1p1f1",
+            "CMIP6_UKESM1-0-LL_amip_r1i1p1f2",
+            "CMIP6_MPI-ESM1-2-LR_amip-p4K_r1i1p1f1",  # another experiment
+            "CMIP6_MPI-ESM1-2-LR_historical-ssp245_r1i1p1f1",  # the CB2 ensemble
+        ],
+    )
+    monkeypatch.setenv(STAGED_ROOT_ENV, str(tmp_path))
+    clear_discovery_cache()
+    try:
+        sources = list(StagedCMIP6Amip().generate(_variable("tas")))
+        assert sorted(s.id for s in sources) == [
+            "CMIP6_MPI-ESM1-2-LR_amip_r1i1p1f1",
+            "CMIP6_MPI-ESM1-2-LR_amip_r2i1p1f1",
+            "CMIP6_UKESM1-0-LL_amip_r1i1p1f2",
+        ]
+        assert {s.information.exp for s in sources} == {"amip"}
+        assert {s.information.name for s in sources} == {"MPI-ESM1-2-LR", "UKESM1-0-LL"}
+        assert sources[0].esmvaltool_dataset_facets["exp"] == ["amip"]
+        # the historical+SSP2-4.5 generator, same root, sees only its own
+        cb2 = list(StagedCMIP6HistoricalSSP245().generate(_variable("tas")))
+        assert [s.id for s in cb2] == ["CMIP6_MPI-ESM1-2-LR_historical-ssp245_r1i1p1f1"]
+    finally:
+        clear_discovery_cache()
+
+
+def test_staged_root_env_defaults_to_the_protocols_and_can_be_overridden(
+    tmp_path,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    from dataclasses import replace
+
+    from climatebench2.data import StagedCMIP6Ensemble
+    from climatebench2.protocol import CB2_PROTOCOL, use_protocol
+
+    _stage_tree(tmp_path, ["CMIP6_M_historical-ssp245_r1i1p1f1"])
+    monkeypatch.delenv(STAGED_ROOT_ENV, raising=False)
+    monkeypatch.setenv("TOY_STAGED_ROOT", str(tmp_path))
+    clear_discovery_cache()
+    try:
+        assert list(StagedCMIP6HistoricalSSP245().generate(_variable("tas"))) == []
+        with use_protocol(replace(CB2_PROTOCOL, staged_root_env="TOY_STAGED_ROOT")):
+            assert len(list(StagedCMIP6HistoricalSSP245().generate(_variable("tas")))) == 1
+            assert staged_root() == tmp_path
+
+        class Own(StagedCMIP6Ensemble):
+            staged_root_env = "TOY_STAGED_ROOT"
+
+        assert len(list(Own().generate(_variable("tas")))) == 1
+    finally:
+        clear_discovery_cache()
+
+
+def test_experiment_frequency_comes_from_the_protocol() -> None:
+    from dataclasses import replace
+
+    from climatebench2.data import frequency
+    from climatebench2.protocol import CB2_PROTOCOL, use_protocol
+
+    assert frequency.experiment_frequency("day") == "day"
+    assert frequency.experiment_frequency("amip_day") == "mon"
+    toy = replace(
+        CB2_PROTOCOL,
+        experiment_frequency={"amip_day": "day"},
+    )
+    with use_protocol(toy):
+        assert frequency.experiment_frequency("amip_day") == "day"
+        assert frequency.experiment_frequency("day") == "mon"  # not this protocol's
+    assert frequency.experiment_frequency("amip_day") == "mon"
