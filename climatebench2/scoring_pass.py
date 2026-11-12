@@ -107,7 +107,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -120,7 +120,19 @@ if TYPE_CHECKING:
 
 #: Value of the ``scorer`` column on every row this pass writes. Rows with
 #: this tag are deleted before a re-run, which makes the pass idempotent.
+#: Read it through :func:`scorer_tag`, never directly, so a protocol that
+#: names its own scorer changes one function.
 SCORER = "climatebench2"
+
+
+def scorer_tag() -> str:
+    """The ``scorer`` tag of every row this pass writes (and later deletes).
+
+    The one place the pass learns its own name. ClimateBench2 returns
+    :data:`SCORER`; a protocol built on this pass overrides it here.
+    """
+    return SCORER
+
 
 #: ``scorer`` tag of the score rows the **Tier III paleo diagnostics** write
 #: for themselves (:mod:`climatebench2.diags.tier3_paleo`). Their pseudo-
@@ -1089,7 +1101,7 @@ def empty_score_row(
     var_id: str,
     reason: str = "",
     *,
-    scorer: str = SCORER,
+    scorer: str | None = None,
 ) -> dict[str, Any]:
     """A score row with every numeric column NaN and every text column empty.
 
@@ -1109,7 +1121,7 @@ def empty_score_row(
         data_id=data_id,
         data_type=data_type,
         var_id=var_id,
-        scorer=scorer,
+        scorer=scorer_tag() if scorer is None else scorer,
         reason=reason,
     )
     return row
@@ -1407,6 +1419,307 @@ def _pattern_scaling_row(
     return row
 
 
+# ---------------------------------------------------------------------------
+# Pluggable baselines (the registry)
+# ---------------------------------------------------------------------------
+
+#: The three layouts the pass scores. A baseline declares which it speaks to.
+LAYOUT_TIME = "time"
+LAYOUT_EOF = "eof"
+LAYOUT_SCALAR = "scalar"
+_LAYOUTS = (LAYOUT_TIME, LAYOUT_EOF, LAYOUT_SCALAR)
+
+#: ``tier2.baselines`` when the key is absent: ClimateBench2's two baselines,
+#: in the order their rows have always been written.
+DEFAULT_BASELINES: tuple[str, ...] = ("climatology", "pattern_scaling")
+
+
+@dataclass(frozen=True, eq=False)
+class BaselineContext:
+    """Everything a baseline may use to forecast one scored variable.
+
+    One context is built per ``(diagnostic, variable)`` and per layout
+    (:attr:`layout`): the time-series layout, the EOF-coefficient layout or the
+    aggregated-scalar layout. It is exactly what ClimateBench2's own two
+    baselines receive, plus the resolved windows, so a baseline never has to
+    read the thresholds to learn where it is scored.
+
+    ``var_id``
+        The scored variable (a ``raw_output`` column; the ``var_id`` of an
+        EOF table).
+    ``diagnostic``
+        The suite entry name == the DuckDB schema the rows land in.
+    ``layout``
+        ``"time"``, ``"eof"`` or ``"scalar"``.
+    ``reference``
+        The observed target **as scored**: columns ``time`` and ``value`` (an
+        anomaly where the entry is scored on anomalies, cut to the scored
+        window). EOF layout: ``mode`` and ``value`` (the standardised
+        coefficients). Scalar layout: a single row with ``value``.
+    ``reference_full``
+        Time layout only: the reference's whole record, i.e. ``reference``
+        plus the pre-window record that ``ReferenceBaselineRecord`` stores
+        (in the same anomaly space) — the sample a baseline is fitted on.
+        Other layouts: the same as ``reference``.
+    ``monthly``
+        Whether the time axis is monthly (else annual). False off the time
+        layout.
+    ``settings``
+        The bootstrap settings (``tier2.bootstrap``) rows are scored with.
+    ``sigma_obs``
+        The observational σ of the scored steps: a ``pd.Series`` indexed by
+        the reference's times (time layout), a float (scalar layout) or
+        ``None``. Pass it through :meth:`score`, which aligns it to your
+        steps; every model and baseline sees the same obs draws.
+    ``sigma_floor``
+        The protocol floor (``tier2.obs_sigma``) used where ``sigma_obs`` has
+        no value for a step.
+    ``baseline_records``
+        The pre-window ``reference_baseline`` series the database carries,
+        ``(variable, "monthly" | "annual") -> frame``, in anomaly space.
+    ``baseline_period``
+        ``(first_year, last_year)`` of the window the anomalies are taken
+        about and the Climatology sample is drawn from.
+    ``window``
+        ``(first_year, last_year)`` the entry is scored on; ``last_year`` is
+        ``None`` when the window is open-ended (the default: every step from
+        ``tier2.test_window_start`` on).
+    ``raw``
+        The table the pass is scoring (anomalised and cut for a time
+        series; this variable's rows for an EOF table): a baseline whose
+        predictor lives in the same table can read it here.
+    """
+
+    var_id: str
+    diagnostic: str
+    layout: str
+    reference: pd.DataFrame
+    reference_full: pd.DataFrame
+    monthly: bool
+    settings: dict[str, Any]
+    sigma_obs: Any = None
+    sigma_floor: float = 0.0
+    baseline_records: dict[tuple[str, str], pd.DataFrame] | None = None
+    baseline_period: tuple[int, int] = (0, 0)
+    window: tuple[int, int | None] = (0, None)
+    raw: pd.DataFrame | None = None
+
+    def score(
+        self,
+        members: np.ndarray,
+        obs: np.ndarray,
+        times: pd.Series | pd.DatetimeIndex | None = None,
+    ) -> dict[str, Any]:
+        """Score a baseline ensemble into a row, exactly as the models' are.
+
+        ``members`` is ``(n_members, n_steps)`` (scalar layout: ``(n_members,)``)
+        and ``obs`` the observed values of those steps. Time layout: ``times``
+        are the steps' dates (they align ``sigma_obs`` and label the steps).
+        The row has fair CRPS, its ESS error and its bootstrap interval; the
+        registry stamps its ``data_id`` and ``data_type``.
+        """
+        members = np.asarray(members, dtype=float)
+        obs = np.atleast_1d(np.asarray(obs, dtype=float))
+        if self.layout == LAYOUT_EOF:
+            return _eof_score_row(
+                data_id="",
+                data_type="baseline",
+                var_id=self.var_id,
+                members=np.atleast_2d(members),
+                obs=obs,
+                settings=self.settings,
+            )
+        if self.layout == LAYOUT_SCALAR:
+            return _scalar_score_row(
+                data_id="",
+                data_type="baseline",
+                var_id=self.var_id,
+                values=members.reshape(-1),
+                obs=float(obs.reshape(-1)[0]),
+                sigma_obs=float(self.sigma_obs or 0.0),
+            )
+        if times is None:
+            msg = "BaselineContext.score needs the steps' `times` on the time layout"
+            raise ValueError(msg)
+        times = pd.Series(pd.to_datetime(pd.Series(times)).to_numpy())
+        return _score_row(
+            data_id="",
+            data_type="baseline",
+            var_id=self.var_id,
+            members=np.atleast_2d(members),
+            obs=obs,
+            monthly=self.monthly,
+            settings=self.settings,
+            obs_sigma=_sigma_at(self.sigma_obs, times, self.sigma_floor),
+        )
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """One registered baseline: its function, its row's ``data_id``, its layouts."""
+
+    name: str
+    fn: Callable[[BaselineContext], dict[str, Any] | None]
+    data_id: str
+    layouts: tuple[str, ...]
+
+    def __call__(self, context: BaselineContext) -> dict[str, Any] | None:
+        """Run the baseline function."""
+        return self.fn(context)
+
+
+#: ``name -> Baseline``. ClimateBench2's two baselines are registered below at
+#: import; a package registers its own at its import time
+#: (:func:`register_baseline`) and lists the name in ``tier2.baselines``.
+BASELINES: dict[str, Baseline] = {}
+
+
+def register_baseline(
+    name: str,
+    fn: Callable[[BaselineContext], dict[str, Any] | None],
+    *,
+    data_id: str | None = None,
+    layouts: tuple[str, ...] = (LAYOUT_TIME,),
+) -> None:
+    """Register a baseline under ``name`` (idempotent for the same function).
+
+    ``fn(context)`` returns a score row — build it with
+    :meth:`BaselineContext.score` — or ``None`` when the baseline has nothing
+    to say for this variable (no row is written). ``data_id`` is the stable
+    ``data_id`` of the baseline's row (default: ``name``); the registry stamps
+    it, with ``data_type = "baseline"``, onto whatever row ``fn`` returns, so
+    the row can be found again (``E_ref`` in ``climatology`` mode finds
+    :data:`CLIMATOLOGY_DATA_ID` this way). ``layouts`` lists the layouts the
+    function is called for (``"time"``, ``"eof"``, ``"scalar"``).
+
+    It runs only when ``name`` is listed in ``tier2.baselines``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown layout, or a name already taken by another function.
+    """
+    unknown = set(layouts) - set(_LAYOUTS)
+    if unknown:
+        msg = f"Unknown baseline layout(s) {sorted(unknown)} (expected {_LAYOUTS})"
+        raise ValueError(msg)
+    existing = BASELINES.get(name)
+    if existing is not None and existing.fn is not fn:
+        msg = f"A different baseline is already registered as '{name}'"
+        raise ValueError(msg)
+    BASELINES[name] = Baseline(
+        name=name,
+        fn=fn,
+        data_id=name if data_id is None else str(data_id),
+        layouts=tuple(layouts),
+    )
+
+
+def configured_baselines(layout: str) -> list[Baseline]:
+    """The baselines ``tier2.baselines`` lists that speak to ``layout``, in order.
+
+    Read when the pass runs, never at import: the threshold stack can change
+    after this module is imported.
+    """
+    names = get_threshold("tier2.baselines", None)
+    names = list(DEFAULT_BASELINES) if names is None else list(names)
+    selected: list[Baseline] = []
+    for name in names:
+        if name not in BASELINES:
+            msg = (
+                f"tier2.baselines lists '{name}', which is not registered "
+                f"(registered: {sorted(BASELINES)}). Import the package that "
+                f"calls register_baseline('{name}', ...) before scoring."
+            )
+            raise ValueError(msg)
+        if layout in BASELINES[name].layouts:
+            selected.append(BASELINES[name])
+    return selected
+
+
+def _run_baselines(
+    context: BaselineContext,
+    scored: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    """Run every configured baseline of ``context.layout``, adding its rows."""
+    for baseline in configured_baselines(context.layout):
+        row = baseline(context)
+        if row is None:
+            continue
+        full = empty_score_row(baseline.data_id, "baseline", context.var_id)
+        full.update(row)
+        full["data_id"] = baseline.data_id
+        if not full.get("data_type"):
+            full["data_type"] = "baseline"
+        if not full.get("var_id"):
+            full["var_id"] = context.var_id
+        scored[str(full["data_type"]), baseline.data_id] = full
+
+
+def _reference_full(
+    reference: pd.DataFrame,
+    column: str,
+    baseline: dict[tuple[str, str], pd.DataFrame] | None,
+    *,
+    monthly: bool,
+) -> pd.DataFrame:
+    """The reference's scored rows plus its recorded pre-window series."""
+    frames = [reference[["time", column]].dropna()]
+    recorded = _baseline_window_series(baseline, column, monthly=monthly)
+    if recorded is not None:
+        frames.append(recorded[["time", column]].dropna())
+    joined = (
+        pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset="time")
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+    return joined.rename(columns={column: "value"})
+
+
+def _column_frame(context: BaselineContext) -> pd.DataFrame:
+    """The context's reference, with the value column named as the variable."""
+    return context.reference.rename(columns={"value": context.var_id})
+
+
+def _climatology_baseline(context: BaselineContext) -> dict[str, Any] | None:
+    """Registered form of :func:`_climatology_row`."""
+    return _climatology_row(
+        _column_frame(context),
+        context.var_id,
+        context.settings,
+        baseline=context.baseline_records,
+        sigma=context.sigma_obs,
+        floor=context.sigma_floor,
+    )
+
+
+def _pattern_scaling_baseline(context: BaselineContext) -> dict[str, Any] | None:
+    """Registered form of the pattern-scaling baseline, per layout."""
+    if context.layout == LAYOUT_EOF:
+        return _eof_pattern_scaling_row(
+            context.raw if context.raw is not None else context.reference,
+            context.var_id,
+        )
+    return _pattern_scaling_row(
+        _column_frame(context),
+        context.var_id,
+        context.settings,
+        baseline=context.baseline_records,
+        sigma=context.sigma_obs,
+        floor=context.sigma_floor,
+    )
+
+
+register_baseline("climatology", _climatology_baseline, data_id=CLIMATOLOGY_DATA_ID)
+register_baseline(
+    "pattern_scaling",
+    _pattern_scaling_baseline,
+    data_id=PATTERN_SCALING_DATA_ID,
+    layouts=(LAYOUT_TIME, LAYOUT_EOF),
+)
+
+
 def _apply_reference_skill(scored: dict[tuple[str, str], dict[str, Any]]) -> None:
     """Fill ``e_ref`` / ``n_ref_models`` / ``skill`` in place.
 
@@ -1694,26 +2007,35 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
                 if row is not None:
                     consistency.append(row)
 
-        clim = _climatology_row(
-            reference,
-            column,
-            settings,
-            baseline=baseline,
-            sigma=sigma,
-            floor=floor,
+        ref_sorted = reference[["time", column]].dropna().sort_values("time")
+        ref_monthly = not ref_sorted.empty and is_monthly(ref_sorted["time"])
+        _run_baselines(
+            BaselineContext(
+                var_id=column,
+                diagnostic=diagnostic,
+                layout=LAYOUT_TIME,
+                reference=reference[["time", column]].rename(
+                    columns={column: "value"},
+                ),
+                reference_full=_reference_full(
+                    reference,
+                    column,
+                    baseline,
+                    monthly=ref_monthly,
+                ),
+                monthly=ref_monthly,
+                settings=settings,
+                sigma_obs=sigma,
+                sigma_floor=floor,
+                baseline_records=baseline,
+                baseline_period=tuple(
+                    int(y) for y in get_threshold("tier2.climatology_baseline_period")
+                ),
+                window=(int(get_threshold("tier2.test_window_start")), None),
+                raw=raw_df,
+            ),
+            scored,
         )
-        scored[clim["data_type"], clim["data_id"]] = clim
-
-        pattern = _pattern_scaling_row(
-            reference,
-            column,
-            settings,
-            baseline=baseline,
-            sigma=sigma,
-            floor=floor,
-        )
-        if pattern is not None:
-            scored[pattern["data_type"], pattern["data_id"]] = pattern
 
         _apply_reference_skill(scored)
         rows.extend(scored.values())
@@ -2030,6 +2352,37 @@ def _scalar_consistency_row(
     return row
 
 
+def _scalar_score_row(
+    *,
+    data_id: str,
+    data_type: str,
+    var_id: str,
+    values: np.ndarray,
+    obs: float,
+    sigma_obs: float,
+) -> dict[str, Any]:
+    """Fair CRPS of one aggregated scalar: members' values against the observation."""
+    crps_k = scoring.crps_fair_with_obs_draws(
+        values[:, None],
+        np.array([obs], dtype=float),
+        obs_sigma=sigma_obs,
+        n_draws=int(get_threshold("tier2.obs_uncertainty.n_draws")),
+        seed=int(get_threshold("tier2.obs_uncertainty.seed")),
+    )
+    summary = scoring.crps_independent_summary(crps_k, values.size)
+    row = _empty_row(data_id, data_type, var_id, "")
+    row.update(
+        crps=summary.score,
+        crps_se=summary.standard_error,
+        t_eff=summary.t_eff,
+        r1=summary.r1,
+        n_members=float(summary.n_members),
+        n_time=float(summary.n_time),
+        sigma_obs=sigma_obs,
+    )
+    return row
+
+
 def score_scalar_output(  # noqa: C901
     raw_df: pd.DataFrame,
     data_sources: pd.DataFrame | None,
@@ -2059,8 +2412,6 @@ def score_scalar_output(  # noqa: C901
         and not c.endswith(SCALAR_SIGMA_OBS_SUFFIX)
         and not _INDEX_COLUMN_RE.match(str(c))
     ]
-    n_draws = int(get_threshold("tier2.obs_uncertainty.n_draws"))
-    seed = int(get_threshold("tier2.obs_uncertainty.seed"))
 
     rows: list[dict[str, Any]] = []
     for column in var_columns:
@@ -2097,25 +2448,14 @@ def score_scalar_output(  # noqa: C901
                 scored[key]["n_members"] = float(values.size)
                 scored[key]["n_time"] = 1.0
             else:
-                crps_k = scoring.crps_fair_with_obs_draws(
-                    values[:, None],
-                    np.array([obs], dtype=float),
-                    obs_sigma=sigma_obs,
-                    n_draws=n_draws,
-                    seed=seed,
-                )
-                summary = scoring.crps_independent_summary(crps_k, values.size)
-                row = _empty_row(name, data_type, column, "")
-                row.update(
-                    crps=summary.score,
-                    crps_se=summary.standard_error,
-                    t_eff=summary.t_eff,
-                    r1=summary.r1,
-                    n_members=float(summary.n_members),
-                    n_time=float(summary.n_time),
+                scored[key] = _scalar_score_row(
+                    data_id=name,
+                    data_type=data_type,
+                    var_id=column,
+                    values=values,
+                    obs=float(obs),
                     sigma_obs=sigma_obs,
                 )
-                scored[key] = row
             row = _scalar_consistency_row(
                 data_id=name,
                 data_type=data_type,
@@ -2130,6 +2470,20 @@ def score_scalar_output(  # noqa: C901
 
         if not scored:
             continue
+        _run_baselines(
+            BaselineContext(
+                var_id=column,
+                diagnostic=diagnostic,
+                layout=LAYOUT_SCALAR,
+                reference=pd.DataFrame({"value": [float(obs)]}),
+                reference_full=pd.DataFrame({"value": [float(obs)]}),
+                monthly=False,
+                settings={},
+                sigma_obs=sigma_obs,
+                raw=raw_df,
+            ),
+            scored,
+        )
         _apply_reference_skill(scored)
         rows.extend(scored.values())
         rows.extend(consistency)
@@ -2189,9 +2543,10 @@ def score_eof_output(
         references = var_frame[var_frame["data_type"] == "reference"]
         if references.empty:
             continue
-        obs = _coefficient_vector(
-            references[references["data_id"] == references["data_id"].iloc[0]],
-        )
+        reference_frame = references[
+            references["data_id"] == references["data_id"].iloc[0]
+        ].sort_values("mode")
+        obs = _coefficient_vector(reference_frame)
         if obs.size == 0:
             continue
 
@@ -2238,9 +2593,24 @@ def score_eof_output(
 
         if not scored:
             continue
-        scored["baseline", PATTERN_SCALING_DATA_ID] = _eof_pattern_scaling_row(
-            var_frame,
-            str(var_id),
+        eof_reference = pd.DataFrame(
+            {
+                "mode": reference_frame["mode"].to_numpy(float),
+                "value": obs,
+            },
+        )
+        _run_baselines(
+            BaselineContext(
+                var_id=str(var_id),
+                diagnostic=diagnostic,
+                layout=LAYOUT_EOF,
+                reference=eof_reference,
+                reference_full=eof_reference,
+                monthly=False,
+                settings=settings,
+                raw=var_frame,
+            ),
+            scored,
         )
         _apply_reference_skill(scored)
         rows.extend(scored.values())
@@ -2542,7 +2912,7 @@ def _clear_rows(con: Any, schema: str, *, has_metrics: bool) -> None:  # noqa: A
         return
     con.execute(
         f'DELETE FROM "{schema}"."metrics" WHERE scorer = ?',  # noqa: S608
-        [SCORER],
+        [scorer_tag()],
     )
 
 
@@ -2571,7 +2941,7 @@ def _write_rows(
         if "scorer" in existing:
             con.execute(
                 f'DELETE FROM "{schema}"."metrics" WHERE scorer = ?',  # noqa: S608
-                [SCORER],
+                [scorer_tag()],
             )
         columns = ", ".join(f'"{c}"' for c in _SCORE_COLUMNS)
         con.execute(

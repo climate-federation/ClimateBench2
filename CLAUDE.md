@@ -84,6 +84,11 @@ climatebench2/
   (§II.1). A simple diagnostic writes the third shape through `ScalarTableDiagnostic`
   (`diags/tier2_daily.py`). A skill score that is not an error (the Perkins PDF
   overlap) is written as a metric and never enters `E_ref`.
+- The Tier II pass's baselines come from a registry
+  (`scoring_pass.register_baseline(name, fn, data_id=..., layouts=...)`, `BASELINES`,
+  `BaselineContext`); `tier2.baselines` (optional, default `[climatology,
+  pattern_scaling]`) lists which run. A package registers its own at import time. Every
+  use of the scorer tag goes through `scoring_pass.scorer_tag()`.
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
   `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
   `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so
