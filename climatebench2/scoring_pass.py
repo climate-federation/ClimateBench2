@@ -1870,10 +1870,67 @@ def _member_label(data_id: str, variants: dict[str, str]) -> str:
     return variant if variant and variant != "nan" else data_id
 
 
-def _drain_steps(rows: Any) -> None:  # noqa: ANN401
-    """Remove the private per-step payload from finished rows."""
+#: Columns of the ``score_steps`` table, with their DuckDB types.
+_STEP_COLUMNS: dict[str, str] = {
+    "data_id": "VARCHAR",
+    "data_type": "VARCHAR",
+    "var_id": "VARCHAR",
+    "step_kind": "VARCHAR",
+    "step": "VARCHAR",
+    "left_out": "VARCHAR",
+    "crps": "DOUBLE",
+    "scorer": "VARCHAR",
+}
+
+#: Fewest members a model needs for leave-one-member-out rows (the ensemble
+#: left behind must still have the two members a fair CRPS needs).
+_MIN_MEMBERS_LEAVE_ONE_OUT = 3
+
+
+def persist_steps_enabled() -> bool:
+    """Whether the pass writes ``score_steps`` (``tier2.persist_steps``, default off)."""
+    return bool(get_threshold("tier2.persist_steps", False))
+
+
+def _drain_steps(
+    rows: Any,  # noqa: ANN401
+    steps_out: list[dict[str, Any]] | None = None,
+) -> None:
+    """Take the private per-step payload off finished rows.
+
+    With ``steps_out`` the per-step rows are appended to it: one per step with
+    ``left_out = ""`` and, for a model (never a baseline, whose pseudo-members
+    are not members of anything) with at least three members, one set per
+    left-out member — the fair CRPS of the ensemble without that member, under
+    the same observations and observational draws.
+    """
     for row in rows:
-        row.pop(_STEPS_KEY, None)
+        payload: _StepData | None = row.pop(_STEPS_KEY, None)
+        if payload is None or steps_out is None:
+            continue
+        head = {
+            "data_id": str(row["data_id"]),
+            "data_type": str(row["data_type"]),
+            "var_id": str(row["var_id"]),
+            "step_kind": payload.kind,
+            "scorer": scorer_tag(),
+        }
+
+        def emit(left_out: str, crps: np.ndarray, head: dict[str, Any] = head, payload: _StepData = payload) -> None:
+            steps_out.extend(
+                {**head, "step": step, "left_out": left_out, "crps": float(value)}
+                for step, value in zip(payload.steps, crps, strict=True)
+            )
+
+        emit("", payload.crps)
+        n_members = payload.members.shape[0]
+        if (
+            payload.member_labels is not None
+            and row["data_type"] != "baseline"
+            and n_members >= _MIN_MEMBERS_LEAVE_ONE_OUT
+        ):
+            for i, label in enumerate(payload.member_labels):
+                emit(label, payload.crps_fn(np.delete(payload.members, i, axis=0)))
 
 
 def _e_ref_settings() -> tuple[str, tuple[int, int] | None]:
@@ -2091,6 +2148,7 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
     baseline: dict[tuple[str, str], pd.DataFrame] | None = None,
     sigma_internal: SigmaInternal | None = None,
     diagnostic: str = "",
+    steps_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Score one diagnostic's ``raw_output`` table; returns metrics rows.
 
@@ -2099,6 +2157,9 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
     **anomalies about each source's own baseline-window climatology** and cut
     to the scored window (:func:`anomalise_raw_output`), so everything below
     works on the quantity the paper defines regime (a) over.
+
+    ``steps_out``, if given, collects the per-step fair CRPS of every scored
+    model and baseline (the ``score_steps`` rows, :func:`_drain_steps`).
 
     Pure pandas/numpy — the database plumbing is in :func:`score_database`.
     """
@@ -2305,7 +2366,7 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
         )
 
         _apply_reference_skill(scored, kind=STEP_KIND_TIME)
-        _drain_steps(scored.values())
+        _drain_steps(scored.values(), steps_out)
         rows.extend(scored.values())
         rows.extend(consistency)
     rows.extend(le_spread_rows(groups, truth, var_columns, carriers=carriers))
@@ -2675,6 +2736,7 @@ def score_scalar_output(  # noqa: C901
     *,
     sigma_internal: SigmaInternal | None = None,
     diagnostic: str = "",
+    steps_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Score an aggregated-scalar ``raw_output`` (metrics_reference.md §II.1).
 
@@ -2775,7 +2837,7 @@ def score_scalar_output(  # noqa: C901
             scored,
         )
         _apply_reference_skill(scored, kind=STEP_KIND_SCALAR)
-        _drain_steps(scored.values())
+        _drain_steps(scored.values(), steps_out)
         rows.extend(scored.values())
         rows.extend(consistency)
     _apply_window_labels(
@@ -2808,6 +2870,7 @@ def score_eof_output(
     *,
     settings: dict[str, Any] | None = None,
     diagnostic: str = "",
+    steps_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Score a regime-(b) coefficient table (metrics_reference.md Tier II (b)).
 
@@ -2908,7 +2971,7 @@ def score_eof_output(
             scored,
         )
         _apply_reference_skill(scored, kind=STEP_KIND_MODE)
-        _drain_steps(scored.values())
+        _drain_steps(scored.values(), steps_out)
         rows.extend(scored.values())
     _apply_window_labels(
         rows,
@@ -3153,6 +3216,7 @@ def score_database(
             schema: _schema_tables(con, schema) for schema in _diagnostic_schemas(con)
         }
         baseline = _database_context(con, schemas)
+        persist = persist_steps_enabled()
         for schema, tables in schemas.items():
             if "raw_output" not in tables:
                 continue
@@ -3164,12 +3228,14 @@ def score_database(
                 if "data_sources" in tables
                 else None
             )
+            steps: list[dict[str, Any]] | None = [] if persist else None
             if is_eof_output(raw_df):
                 rows = score_eof_output(
                     raw_df,
                     sources,
                     settings=settings,
                     diagnostic=schema,
+                    steps_out=steps,
                 )
             elif is_scalar_output(raw_df):
                 rows = score_scalar_output(
@@ -3177,6 +3243,7 @@ def score_database(
                     sources,
                     sigma_internal=sigma_internal,
                     diagnostic=schema,
+                    steps_out=steps,
                 )
             else:
                 rows = score_raw_output(
@@ -3186,6 +3253,7 @@ def score_database(
                     baseline=baseline,
                     sigma_internal=sigma_internal,
                     diagnostic=schema,
+                    steps_out=steps,
                 )
             if not rows:
                 # Still clear this diagnostic's OWN earlier rows: a schema
@@ -3194,9 +3262,16 @@ def score_database(
                 # otherwise keep the scores of a previous `--rescore`
                 # for ever, and the pass would not be idempotent.
                 _clear_rows(con, schema, has_metrics="metrics" in tables)
+                _write_steps(con, schema, None, existing="score_steps" in tables)
                 continue
             frame = _score_frame(rows)
             _write_rows(con, schema, frame, has_metrics="metrics" in tables)
+            _write_steps(
+                con,
+                schema,
+                pd.DataFrame(steps, columns=list(_STEP_COLUMNS)) if persist else None,
+                existing="score_steps" in tables,
+            )
             report.diagnostics.append(schema)
             report.rows += len(frame)
             report.scored_models += int(frame["crps"].notna().sum())
@@ -3212,6 +3287,42 @@ def score_database(
     finally:
         con.close()
     return report
+
+
+def _write_steps(
+    con: Any,  # noqa: ANN401
+    schema: str,
+    frame: pd.DataFrame | None,
+    *,
+    existing: bool,
+) -> None:
+    """Rewrite this pass's own rows of ``schema.score_steps``.
+
+    ``frame = None`` (``tier2.persist_steps`` off, or nothing scorable) only
+    deletes the pass's earlier rows from a table that exists — a default run
+    never creates the table. The pass is idempotent here exactly as it is for
+    ``metrics``: its rows (``scorer`` = :func:`scorer_tag`) are deleted, then
+    rewritten.
+    """
+    if existing:
+        con.execute(
+            f'DELETE FROM "{schema}"."score_steps" WHERE scorer = ?',  # noqa: S608
+            [scorer_tag()],
+        )
+    if frame is None:
+        return
+    con.register("cb2_score_steps", frame)
+    try:
+        if not existing:
+            definition = ", ".join(f'"{c}" {t}' for c, t in _STEP_COLUMNS.items())
+            con.execute(f'CREATE TABLE "{schema}"."score_steps" ({definition})')
+        columns = ", ".join(f'"{c}"' for c in _STEP_COLUMNS)
+        con.execute(
+            f'INSERT INTO "{schema}"."score_steps" ({columns}) '  # noqa: S608
+            f"SELECT {columns} FROM cb2_score_steps",
+        )
+    finally:
+        con.unregister("cb2_score_steps")
 
 
 def _score_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:

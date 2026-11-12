@@ -243,6 +243,39 @@ def crps_independent_summary(crps_k: np.ndarray, n_members: int) -> CRPSScore:
 # ---------------------------------------------------------------------------
 
 
+def paired_block_indices(
+    n_steps: int,
+    block_length: int,
+    n_boot: int,
+    seed: int,
+) -> np.ndarray:
+    """Moving-block bootstrap index draws, from a seed alone.
+
+    Returns ``(n_boot, n_steps)`` integer indices into a series of ``n_steps``
+    steps: ``ceil(n_steps / L)`` blocks of ``L`` consecutive steps
+    (``L = clip(block_length, 1, n_steps)``) with start positions drawn
+    uniformly from ``[0, n_steps - L]`` (**non-circular**, as in
+    :func:`moving_block_bootstrap_ci`), concatenated and cut to ``n_steps``.
+
+    The draw depends on ``(n_steps, block_length, n_boot, seed)`` and nothing
+    else — in particular not on how many ensemble members an entry has — so
+    one array can be applied to the per-step scores of **every** entry on the
+    same step axis, which is what a paired comparison (a rank bootstrap)
+    needs: ``scores[indices].mean(axis=1)`` is that entry's bootstrap
+    distribution, resampled identically to every other entry's.
+    """
+    n_steps = int(n_steps)
+    if n_steps < 1:
+        msg = f"n_steps must be at least 1, got {n_steps}"
+        raise ValueError(msg)
+    length = int(np.clip(block_length, 1, n_steps))
+    n_blocks = int(np.ceil(n_steps / length))
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, n_steps - length + 1, size=(int(n_boot), n_blocks))
+    idx = starts[:, :, None] + np.arange(length)[None, None, :]
+    return idx.reshape(int(n_boot), n_blocks * length)[:, :n_steps]
+
+
 def moving_block_bootstrap_ci(
     crps_t: np.ndarray,
     *,
@@ -297,7 +330,10 @@ def moving_block_bootstrap_ci(
         and np.asarray(crps_t, dtype=float).size == n_time
     )
     if not resample_members:
-        means = series[block_index(int(n_boot))].mean(axis=1)
+        # The seed alone fixes the draw (same first rng call as `block_index`).
+        means = series[paired_block_indices(n_time, block_length, n_boot, seed)].mean(
+            axis=1,
+        )
     else:
         ensemble = np.atleast_2d(np.asarray(members, dtype=float))
         n_members = ensemble.shape[0]

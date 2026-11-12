@@ -511,3 +511,292 @@ def test_a_window_on_an_absolute_entry_cuts_the_table() -> None:
         )
     assert _row(rows, "MyModel", "to_benchmark")["n_time"] == 10
     assert _row(rows, CLIMATOLOGY_DATA_ID, "baseline")["n_time"] == 10
+
+
+# ---------------------------------------------------------------------------
+# CB-9: paired block indices and the per-step table
+# ---------------------------------------------------------------------------
+
+
+def _old_bootstrap(crps_t, block_length, n_boot, alpha, seed, members=None, obs=None):  # noqa: ANN001, ANN202
+    """``moving_block_bootstrap_ci`` as it was before ``paired_block_indices``."""
+    series = np.asarray(crps_t, dtype=float)
+    series = series[np.isfinite(series)]
+    n_time = series.size
+    length = int(np.clip(block_length, 1, n_time))
+    n_blocks = int(np.ceil(n_time / length))
+    rng = np.random.default_rng(seed)
+    offsets = np.arange(length)
+
+    def block_index(size: int) -> np.ndarray:
+        starts = rng.integers(0, n_time - length + 1, size=(size, n_blocks))
+        idx = starts[:, :, None] + offsets[None, None, :]
+        return idx.reshape(size, n_blocks * length)[:, :n_time]
+
+    if members is None:
+        means = series[block_index(int(n_boot))].mean(axis=1)
+    else:
+        ensemble = np.atleast_2d(np.asarray(members, dtype=float))
+        means = np.empty(int(n_boot))
+        for i in range(int(n_boot)):
+            picked = rng.integers(0, ensemble.shape[0], size=ensemble.shape[0])
+            replicate = scoring.crps_fair(ensemble[picked], obs)
+            means[i] = replicate[block_index(1)[0]].mean()
+    lo, hi = np.percentile(means, [100 * alpha / 2.0, 100 * (1.0 - alpha / 2.0)])
+    return (float(lo), float(hi))
+
+
+def test_paired_block_indices_are_moving_blocks_from_a_seed_alone() -> None:
+    idx = scoring.paired_block_indices(30, 4, 50, seed=7)
+    assert idx.shape == (50, 30)
+    assert idx.min() >= 0
+    assert idx.max() <= 29
+    # blocks of 4 consecutive steps (the last one is cut to 30 = 7 * 4 + 2)
+    assert (np.diff(idx[:, :4], axis=1) == 1).all()
+    assert (np.diff(idx[:, 4:8], axis=1) == 1).all()
+    np.testing.assert_array_equal(idx, scoring.paired_block_indices(30, 4, 50, seed=7))
+    assert not np.array_equal(idx, scoring.paired_block_indices(30, 4, 50, seed=8))
+    # a block longer than the series degenerates to the series itself
+    np.testing.assert_array_equal(
+        scoring.paired_block_indices(5, 99, 3, seed=0),
+        np.tile(np.arange(5), (3, 1)),
+    )
+    with pytest.raises(ValueError, match="n_steps"):
+        scoring.paired_block_indices(0, 1, 1, seed=0)
+
+
+def test_one_draw_applies_to_every_entry_on_the_same_axis() -> None:
+    rng = np.random.default_rng(0)
+    a, b = rng.normal(size=40), rng.normal(size=40)
+    idx = scoring.paired_block_indices(40, 3, 200, seed=1)
+    # paired: the difference of the resampled means is the resampled difference
+    np.testing.assert_allclose(
+        a[idx].mean(axis=1) - b[idx].mean(axis=1),
+        (a - b)[idx].mean(axis=1),
+    )
+
+
+def test_moving_block_bootstrap_ci_is_bit_identical_for_existing_callers() -> None:
+    rng = np.random.default_rng(3)
+    members = rng.normal(size=(4, 36))
+    obs = rng.normal(size=36)
+    crps_t = scoring.crps_fair(members, obs)
+    for block in (1, 3, 12, 50):
+        assert scoring.moving_block_bootstrap_ci(
+            crps_t,
+            block_length=block,
+            n_boot=80,
+            seed=5,
+        ) == _old_bootstrap(crps_t, block, 80, 0.05, 5)
+        assert scoring.moving_block_bootstrap_ci(
+            crps_t,
+            block_length=block,
+            n_boot=20,
+            seed=5,
+            members=members,
+            obs=obs,
+        ) == _old_bootstrap(crps_t, block, 20, 0.05, 5, members, obs)
+
+
+STEPS_ON = {"tier2": {"persist_steps": True}}
+
+
+def _steps(db_path) -> pd.DataFrame:  # noqa: ANN001
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        return con.execute(f'SELECT * FROM "{DIAGNOSTIC}"."score_steps"').df()
+    finally:
+        con.close()
+
+
+def _tables_of(db_path) -> set[str]:  # noqa: ANN001
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        return {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    finally:
+        con.close()
+
+
+def test_nothing_is_written_unless_persist_steps_is_on(synthetic_db) -> None:  # noqa: ANN001, F811
+    scoring_pass.score_database(synthetic_db, settings=FAST)
+    assert "score_steps" not in _tables_of(synthetic_db)
+
+
+def test_score_steps_reproduce_the_stored_crps_and_leave_one_out(synthetic_db) -> None:  # noqa: ANN001, F811
+    with use_thresholds(STEPS_ON):
+        scoring_pass.score_database(synthetic_db, settings=FAST)
+    steps = _steps(synthetic_db)
+    assert list(steps.columns) == [
+        "data_id",
+        "data_type",
+        "var_id",
+        "step_kind",
+        "step",
+        "left_out",
+        "crps",
+        "scorer",
+    ]
+    assert set(steps["scorer"]) == {scoring_pass.scorer_tag()}
+    assert set(steps["step_kind"]) == {"time"}
+    assert steps["step"].iloc[0] == "1985-01-01" or "-" in steps["step"].iloc[0]
+
+    con = duckdb.connect(str(synthetic_db), read_only=True)
+    try:
+        metrics = con.execute(
+            f'SELECT * FROM "{DIAGNOSTIC}"."metrics" WHERE scorer = ? AND crps IS NOT NULL',
+            [scoring_pass.scorer_tag()],
+        ).df()
+    finally:
+        con.close()
+    whole = steps[steps["left_out"] == ""]
+    for _, row in metrics.iterrows():
+        mine = whole[
+            (whole["data_id"] == row["data_id"])
+            & (whole["data_type"] == row["data_type"])
+            & (whole["var_id"] == row["var_id"])
+        ]
+        assert len(mine) == row["n_time"]
+        # no ESS reweighting touches the point score: the mean IS the crps
+        assert mine["crps"].mean() == pytest.approx(row["crps"], rel=1e-12)
+
+    # the 3-member model has leave-one-out rows; 2-member models and baselines do not
+    loo = steps[steps["left_out"] != ""]
+    assert set(loo["data_id"]) == {"MyModel"}
+    assert set(loo["data_type"]) == {"to_benchmark"}
+    assert set(loo["left_out"]) == {"r1i1p1f1", "r2i1p1f1", "r3i1p1f1"}
+    assert len(loo) == 3 * len(
+        whole[(whole["data_id"] == "MyModel") & (whole["data_type"] == "to_benchmark")],
+    )
+
+
+def test_leave_one_out_rows_are_the_ensemble_without_that_member() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    with use_thresholds(NO_DRAWS):
+        steps: list[dict] = []
+        score_raw_output(raw, sources, settings=FAST, steps_out=steps)
+    frame = pd.DataFrame(steps)
+    members, obs, _years = _model_steps(raw, sources, "MyModel", "model")
+    for i, label in enumerate(["r1i1p1f1", "r2i1p1f1", "r3i1p1f1"]):
+        got = frame[
+            (frame["data_id"] == "MyModel")
+            & (frame["data_type"] == "to_benchmark")
+            & (frame["left_out"] == label)
+        ]
+        expected = scoring.crps_fair(np.delete(members, i, axis=0), obs)
+        np.testing.assert_allclose(got["crps"].to_numpy(), expected)
+
+
+def test_the_pass_rewrites_its_own_step_rows(synthetic_db) -> None:  # noqa: ANN001, F811
+    with use_thresholds(STEPS_ON):
+        scoring_pass.score_database(synthetic_db, settings=FAST)
+        first = _steps(synthetic_db)
+        scoring_pass.score_database(synthetic_db, settings=FAST)
+        second = _steps(synthetic_db)
+    assert len(first) == len(second)
+    # a foreign row survives; switching the key off clears only the pass's own
+    con = duckdb.connect(str(synthetic_db))
+    con.execute(
+        f'INSERT INTO "{DIAGNOSTIC}"."score_steps" VALUES '
+        "('x', 'other', 'tas', 'time', '2000-01-01', '', 1.0, 'someone-else')",
+    )
+    con.close()
+    scoring_pass.score_database(synthetic_db, settings=FAST)
+    left = _steps(synthetic_db)
+    assert list(left["scorer"]) == ["someone-else"]
+
+
+def test_eof_and_scalar_layouts_write_mode_and_scalar_steps() -> None:
+    raw, sources = _eof_tables(np.random.default_rng(31))
+    steps: list[dict] = []
+    rows = pd.DataFrame(score_eof_output(raw, sources, settings=FAST, steps_out=steps))
+    frame = pd.DataFrame(steps)
+    assert set(frame["step_kind"]) == {"mode"}
+    mine = frame[
+        (frame["data_id"] == "MyModel")
+        & (frame["data_type"] == "to_benchmark")
+        & (frame["left_out"] == "")
+    ]
+    assert list(mine["step"]) == [str(i) for i in range(1, len(mine) + 1)]
+    crps = _row(rows, "MyModel", "to_benchmark")["crps"]
+    assert mine["crps"].mean() == pytest.approx(crps)
+    assert set(frame[frame["left_out"] != ""]["left_out"]) == {
+        "r1i1p1f1",
+        "r2i1p1f1",
+        "r3i1p1f1",
+    }
+
+    raw, sources = _scalar_tables(np.random.default_rng(51))
+    steps = []
+    rows = pd.DataFrame(score_scalar_output(raw, sources, steps_out=steps))
+    frame = pd.DataFrame(steps)
+    assert set(frame["step_kind"]) == {"scalar"}
+    assert set(frame["step"]) == {"0"}
+    mine = frame[
+        (frame["data_id"] == "MyModel")
+        & (frame["data_type"] == "to_benchmark")
+        & (frame["left_out"] == "")
+    ]
+    assert len(mine) == 1
+    assert mine["crps"].iloc[0] == pytest.approx(
+        _row(rows, "MyModel", "to_benchmark")["crps"],
+    )
+    loo = frame[
+        (frame["data_id"] == "MyModel")
+        & (frame["data_type"] == "to_benchmark")
+        & (frame["left_out"] != "")
+    ]
+    assert len(loo) == 3
+
+
+def test_a_baseline_registered_through_the_context_gets_step_rows(toy_baseline) -> None:  # noqa: ANN001
+    raw, sources = _tables(np.random.default_rng(5))
+    steps: list[dict] = []
+    with use_thresholds({"tier2": {"baselines": ["toy"]}}):
+        score_raw_output(raw, sources, settings=FAST, steps_out=steps)
+    toy = pd.DataFrame(steps).query("data_id == 'ToyBaseline'")
+    assert len(toy) == len(ALL_YEARS_)
+    assert set(toy["left_out"]) == {""}  # pseudo-members: no leave-one-out
+
+
+ALL_YEARS_ = list(range(1985, 2045))
+
+
+def test_frozen_comparison_ignores_the_step_table(tmp_path) -> None:  # noqa: ANN001
+    """Freeze and merge copy their own four tables and leave ``score_steps`` alone."""
+    import shutil
+
+    import test_frozen_comparison as tfc
+
+    (tmp_path / "live").mkdir()
+    live = tfc._write(tmp_path / "live" / "ClimateBench2_TierII.ddb", tfc._live_tables())  # noqa: SLF001
+    with use_thresholds(STEPS_ON):
+        scoring_pass.score_databases([live], settings=FAST)
+    assert "score_steps" in tfc.duckdb.connect(str(live), read_only=True).execute(
+        "SELECT table_name FROM information_schema.tables",
+    ).df()["table_name"].tolist()
+    tfc.fc.freeze([live], tmp_path / "bundle", nominal_timerange="20150101/20341231")
+    run = tmp_path / "run" / live.name
+    run.parent.mkdir()
+    shutil.copy(live, run)
+    assert tfc.fc.strip_comparison_rows(run) > 0
+    tfc.fc.merge(
+        run,
+        tmp_path / "bundle",
+        stripped={tfc.WIDE: ["tas", "pr"], tfc.EOF: ["tas", "pr"]},
+    )
+    with use_thresholds(STEPS_ON):
+        scoring_pass.score_databases([run], settings=FAST)
+
+    def steps_of(path) -> pd.DataFrame:  # noqa: ANN001
+        con = duckdb.connect(str(path), read_only=True)
+        try:
+            return (
+                con.execute(f'SELECT * FROM "{tfc.WIDE}"."score_steps"')
+                .df()
+                .sort_values(["data_id", "data_type", "var_id", "left_out", "step"])
+                .reset_index(drop=True)
+            )
+        finally:
+            con.close()
+
+    pd.testing.assert_frame_equal(steps_of(live), steps_of(run))

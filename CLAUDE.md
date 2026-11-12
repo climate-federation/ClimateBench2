@@ -100,6 +100,12 @@ climatebench2/
   (`windows.scored_window(entry)`, `windows.anomaly_baseline_years(entry)`): the pass
   anomalises about the entry's own period and scores its own window. The CLI/reference
   load windows do not read the per-entry keys yet.
+- Optional `tier2.persist_steps` (default false) makes the pass write a `score_steps`
+  table beside `metrics` (per model/baseline, variable and step: fair CRPS; `left_out`
+  rows for models with >= 3 members). The pass deletes and rewrites its own rows;
+  `frozen_comparison` ignores the table (its `_TABLES` is a fixed list).
+  `scoring.paired_block_indices(n_steps, block_length, n_boot, seed)` gives seed-only
+  moving-block draws to pair resamples across entries.
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
   `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
   `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so
