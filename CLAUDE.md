@@ -123,6 +123,9 @@ climatebench2 score MODEL --name MyModel --member r1i1p1f1=DIR --member r2i1p1f1
 #   4xco2, histaer, day, amip, amip4xco2, patch_ep, patch_wp; gates missing a key skip.
 climatebench2 score MODEL --name MyEmu --not-applicable geostrophic_balance
 #   declare a Tier I gate inapplicable: recorded as n/a, not a fail
+#   works for gate-bearing cube-suite diagnostics too (e.g. enso_gate). A protocol can also make N/A
+#   automatic: `<block>.na_if_missing: [var, ...]` in thresholds -> gate with that var absent writes
+#   applicable=0 rows + `na_reason` (diags/pass_fail.py); ClimateBench2's file has no such key
 climatebench2 score MODEL --name MyModel --suite ClimateBench2_TierIII \
     --experiment picontrol=DIR --experiment lgm=DIR \
     --paleo-data-root paleo_scripts/paleo_data_cache/processed/observations

@@ -329,6 +329,52 @@ def materialise_stripped_suite(
     return str(target), stripped
 
 
+def materialise_not_applicable_suite(
+    resolved: str,
+    out_dir: Path,
+    names: list[str],
+) -> tuple[str, set[str]]:
+    """Write a copy of a cube suite that declares its named gates N/A.
+
+    ``score --not-applicable NAME`` reaches an experiment suite's gates as a
+    diagnostic kwarg; ClimateEval's simple (cube) diagnostics take none, and the
+    kwarg is suite-wide, so it cannot be passed for one stanza that way. It is
+    written instead into the **stanza's own** ``diagnostic_kwargs`` — which
+    ``Suite`` hands to that diagnostic only — and
+    :class:`~climatebench2.diags.pass_fail.GateMixin` accepts it and writes the
+    N/A rows. Only a stanza whose class carries ``_gate_checks`` is touched, so
+    a name that is not a gate-bearing diagnostic stays unmatched (and is
+    warned about) rather than crashing a diagnostic that cannot take the kwarg.
+
+    Returns the path (``resolved`` itself when nothing matched) and the matched
+    names.
+    """
+    import yaml
+
+    from climateeval._utils import str_to_object
+    from climateeval.suites._base import resolve_suite_definition_file
+
+    source = resolve_suite_definition_file(resolved)
+    definition = yaml.safe_load(source.read_text(encoding="utf-8"))
+    matched: set[str] = set()
+    for stanza in definition or ():
+        name = stanza.get("name")
+        if name not in names or not stanza.get("diagnostic"):
+            continue
+        if not getattr(str_to_object(stanza["diagnostic"]), "_gate_checks", ()):
+            continue
+        stanza["diagnostic_kwargs"] = {
+            **(stanza.get("diagnostic_kwargs") or {}),
+            "not_applicable": [name],
+        }
+        matched.add(name)
+    if not matched:
+        return resolved, matched
+    target = out_dir / f"{source.stem}.yml"
+    target.write_text(yaml.safe_dump(definition, sort_keys=False), encoding="utf-8")
+    return str(target), matched
+
+
 def _parse_notes(specs: list[str] | None) -> dict[str, str]:
     """Parse repeated ``--note KEY=VALUE`` options."""
     notes: dict[str, str] = {}
@@ -797,9 +843,19 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
             )
 
         # `not_applicable` is a complex-diagnostic kwarg (declared N/A gates);
-        # ClimateEval's simple diagnostics take no **kwargs, so it is only
-        # handed to the experiment-based suites.
+        # ClimateEval's simple diagnostics take no **kwargs, so for a cube
+        # suite it is written into the stanza of each gate-bearing diagnostic
+        # instead (`materialise_not_applicable_suite`).
         extra_kwargs: dict[str, Any] = {}
+        if spec.shape == "cubes" and not_applicable:
+            na_dir = out_dir / "_not_applicable_suites"
+            na_dir.mkdir(parents=True, exist_ok=True)
+            resolved, matched = materialise_not_applicable_suite(
+                resolved,
+                na_dir,
+                not_applicable,
+            )
+            declared_seen |= matched
         if spec.shape == "experiments" and not_applicable:
             declared_seen |= set(diagnostics) & set(not_applicable)
             extra_kwargs["not_applicable"] = not_applicable
@@ -1324,7 +1380,8 @@ def build_parser(protocol: Protocol | None = None) -> argparse.ArgumentParser:
             "geostrophic_balance for a model with no dynamical "
             "representation). The gate computes nothing and is recorded as "
             "n/a — neither a pass nor a fail — on the scorecard, which is "
-            "different from a gate that simply did not run."
+            "different from a gate that simply did not run. Also reaches "
+            "gate-bearing diagnostics of the cube suites (e.g. enso_gate)."
         ),
     )
     score.add_argument(

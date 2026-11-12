@@ -24,10 +24,18 @@ submission *declared* not applicable (``score --not-applicable NAME``; paper
 representation). A declared-N/A check emits one row per check with
 ``value``/``passes`` NaN, which is how the scorecard distinguishes "does not
 apply" from "was not run" (no row at all).
+
+A protocol may also make N/A **automatic**: a thresholds block with
+``na_if_missing: [var, …]`` makes a gate whose experiments are present but one
+of those variables is not write the same N/A rows, with a string column
+``na_reason`` (``"missing output: evspsbl"``), instead of no row
+(:meth:`SupersetExperimentMixin._missing_output_variables`). Without the key
+(ClimateBench2's file has none) nothing changes.
 """
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -213,12 +221,15 @@ def not_applicable_metrics(
     *,
     data_id: str,
     data_type: str = "to_benchmark",
+    reason: str | None = None,
 ) -> pd.DataFrame:
     """Gate rows for checks a submission declared not applicable.
 
     One row per check with ``value``/``passes`` NaN and ``applicable = 0.0``
     — neither a pass nor a fail (paper §7.1). Nothing is computed, so this
-    needs no data at all.
+    needs no data at all. ``reason`` (an automatic N/A, e.g. ``"missing
+    output: evspsbl"``) adds the string column ``na_reason``; a declared N/A
+    has none.
     """
     return pd.DataFrame(
         [
@@ -231,10 +242,52 @@ def not_applicable_metrics(
                     passes=np.nan,
                     applicable=0.0,
                 ),
+                **({} if reason is None else {"na_reason": reason}),
             }
             for check in checks
         ],
     )
+
+
+def na_if_missing_variables(
+    checks: tuple[GateCheck, ...],
+    threshold_block: str | None = None,
+) -> tuple[str, ...]:
+    """Variables whose absence makes a gate automatically N/A (``na_if_missing``).
+
+    Read lazily from the gate's thresholds block(s): ``threshold_block`` (the
+    gate class's ``_threshold_block``) if given, else the ``block`` of each of
+    its checks. ``()`` — the feature is off — when no block is known or none
+    carries the key, which is every ClimateBench2 gate.
+    """
+    blocks = (
+        [threshold_block]
+        if threshold_block
+        else [b for b in (getattr(c, "block", None) for c in checks) if b]
+    )
+    names: list[str] = []
+    for block in dict.fromkeys(blocks):
+        listed = get_threshold(f"{block}.na_if_missing", None)
+        if listed:
+            names.extend([listed] if isinstance(listed, str) else map(str, listed))
+    return tuple(dict.fromkeys(names))
+
+
+def _has_variable(data: Any, var_name: str) -> bool | None:  # noqa: ANN401
+    """Whether an experiment's data holds ``var_name``; ``None`` if unknowable.
+
+    A CubeList (cubes with a ``var_name``) or an xarray ``Dataset``; anything
+    else (a test stub) cannot be inspected, so the answer is "don't know".
+    """
+    if hasattr(data, "data_vars"):
+        return var_name in data.data_vars
+    try:
+        items = list(data)
+    except TypeError:
+        return None
+    if items and not all(hasattr(item, "var_name") for item in items):
+        return None
+    return any(item.var_name == var_name for item in items)
 
 
 def _with_gate_rows(
@@ -263,6 +316,25 @@ def _with_gate_rows(
     return DiagnosticOutput(
         raw_output=output.raw_output if raw_output is None else raw_output,
         metrics=ibis.memtable(gates_df),
+        variables=output.variables,
+        data_sources=output.data_sources,
+    )
+
+
+def _with_empty_na_reason(output: DiagnosticOutput) -> DiagnosticOutput:
+    """Give an evaluated gate's rows the ``na_reason`` column (empty string).
+
+    Only where the gate *can* write an automatic N/A (``na_if_missing``), so
+    that its evaluated and its N/A rows share one ``metrics`` schema when they
+    are appended into one table.
+    """
+    metrics = output.metrics.to_pandas()
+    if "na_reason" in metrics.columns:
+        return output
+    metrics["na_reason"] = ""
+    return DiagnosticOutput(
+        raw_output=output.raw_output,
+        metrics=ibis.memtable(metrics),
         variables=output.variables,
         data_sources=output.data_sources,
     )
@@ -344,8 +416,43 @@ class GateMixin:
     _gate_checks: ClassVar[tuple[GateCheck, ...]] = ()
     comparison_ensemble: ClassVar[bool] = True
     isolate_crashes: ClassVar[bool] = False
+    _not_applicable: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        *args: Any,
+        not_applicable: list[str] | tuple[str, ...] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Take the ``not_applicable`` kwarg, which ClimateEval's simple diagnostics lack.
+
+        ``score --not-applicable NAME`` reaches a gate-bearing diagnostic of a
+        *cube* suite through its own stanza's ``diagnostic_kwargs`` (the CLI
+        writes it there); this is what accepts it. The complex gates take it
+        first, in :class:`SupersetExperimentMixin`.
+        """
+        if not_applicable is not None:
+            self._not_applicable = tuple(not_applicable)
+        super().__init__(*args, **kwargs)
+
+    @property
+    def declared_not_applicable(self) -> bool:
+        """Whether this gate was declared not applicable by the submission."""
+        return getattr(self, "name", None) in self._not_applicable
 
     def get_output(self, data: Any, data_information: Any) -> DiagnosticOutput:
+        if self.declared_not_applicable:
+            logger.info(
+                f"Gate '{self.name}' declared not applicable for "  # type: ignore[attr-defined]
+                f"'{data_information.id}': emitting N/A rows without computing",
+            )
+            rows = not_applicable_metrics(self._gate_checks, data_id=data_information.id)
+            return DiagnosticOutput(
+                raw_output=None,
+                metrics=None if rows.empty else ibis.memtable(rows),
+                variables=None,  # type: ignore[arg-type] - Suite skips None tables
+                data_sources=None,  # type: ignore[arg-type]
+            )
         if not GateMixin.isolate_crashes:
             return self._gated_output(data, data_information)
         try:
@@ -367,7 +474,13 @@ class GateMixin:
 
     def _gated_output(self, data: Any, data_information: Any) -> DiagnosticOutput:
         output = super().get_output(data, data_information)  # type: ignore[misc]
-        return apply_gate(output, self._gate_checks)
+        output = apply_gate(output, self._gate_checks)
+        if output.metrics is not None and na_if_missing_variables(
+            self._gate_checks,
+            getattr(self, "_threshold_block", None),
+        ):
+            output = _with_empty_na_reason(output)
+        return output
 
 
 @contextmanager
@@ -406,6 +519,15 @@ class SupersetExperimentMixin:
     (paper §7.1), and which is distinct from a gate that simply did not run
     (no rows at all).
 
+    **Automatic N/A** (``na_if_missing``). A gate's thresholds block (its
+    class's ``_threshold_block``, else the ``block`` of its checks) may list
+    variables: when the gate's required experiments are present but one of
+    these variables has no cube in them — checked up front, and also when the
+    gate raises a missing-data error that names one — the gate writes the N/A
+    rows of a declared one plus ``na_reason = "missing output: <var>[, …]"``
+    instead of no row, whatever ``fail_on_missing_data`` says: the protocol
+    declared the output optional. A gate with no such key behaves as before.
+
     Mix in *before* :class:`GateMixin` so the skip short-circuits gating too.
     """
 
@@ -425,16 +547,60 @@ class SupersetExperimentMixin:
         """Whether this gate was declared not applicable by the submission."""
         return getattr(self, "name", None) in getattr(self, "_not_applicable", ())
 
-    def _not_applicable_output(self, data_information: Any) -> DiagnosticOutput:
+    def _na_if_missing(self) -> tuple[str, ...]:
+        """The ``na_if_missing`` variables of this gate's thresholds block."""
+        return na_if_missing_variables(
+            getattr(self, "_gate_checks", ()),
+            getattr(self, "_threshold_block", None),
+        )
+
+    def _missing_output_variables(self, data: dict[str, Any]) -> list[str]:
+        """``na_if_missing`` variables absent from the gate's experiments."""
+        listed = self._na_if_missing()
+        if not listed:
+            return []
+        experiments = [
+            data[key]
+            for key in getattr(self, "_required_data_keys", ())
+            if key in data
+        ]
+        return [
+            name
+            for name in listed
+            if any(_has_variable(exp, name) is False for exp in experiments)
+        ]
+
+    def _not_applicable_output(
+        self,
+        data_information: Any,  # noqa: ANN401
+        reason: str | None = None,
+    ) -> DiagnosticOutput:
         """Gate rows marking every check of this diagnostic as N/A."""
         checks: tuple[GateCheck, ...] = getattr(self, "_gate_checks", ())
-        rows = not_applicable_metrics(checks, data_id=data_information.id)
+        rows = not_applicable_metrics(
+            checks,
+            data_id=data_information.id,
+            reason=reason,
+        )
         return DiagnosticOutput(
             raw_output=None,
             metrics=None if rows.empty else ibis.memtable(rows),
             variables=None,  # type: ignore[arg-type] - Suite skips None tables
             data_sources=None,  # type: ignore[arg-type]
         )
+
+    def _automatic_not_applicable(
+        self,
+        missing: list[str],
+        data_information: Any,  # noqa: ANN401
+    ) -> DiagnosticOutput:
+        """N/A rows for a gate whose optional output is absent (``na_if_missing``)."""
+        reason = f"missing output: {', '.join(missing)}"
+        logger.warning(
+            f"Gate '{self.name}' is not applicable for "  # type: ignore[attr-defined]
+            f"'{data_information.id}' ({reason}): emitting N/A rows",
+        )
+        return self._not_applicable_output(data_information, reason)
 
     def _check_required_dict_keys(self, dict_: dict[str, Any], dict_name: str) -> None:
         """Require a *subset* match so one suite dict feeds every gate."""
@@ -472,9 +638,19 @@ class SupersetExperimentMixin:
                 raise
             logger.warning(f"Skipping gate '{self.name}': {exc}")  # type: ignore[attr-defined]
             return self._empty_output()
+        missing = self._missing_output_variables(data)
+        if missing:
+            return self._automatic_not_applicable(missing, data_information)
         try:
             return super().get_output(data, data_information)  # type: ignore[misc]
         except (ConstraintMismatchError, MissingDataError) as exc:
+            named = [
+                name
+                for name in self._na_if_missing()
+                if re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", str(exc))
+            ]
+            if named:
+                return self._automatic_not_applicable(named, data_information)
             # A VARIABLE the diagnostic wants is absent from an experiment
             # that *was* supplied — e.g. the Tier II submission carries the
             # nine core variables but not `rsds` (the Pinatubo dimming flag)
