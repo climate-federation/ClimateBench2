@@ -275,3 +275,23 @@ def test_time_step_inference_works_on_any_calendar() -> None:
 
     cube.coord("time").units = cf_units.Unit("hours since 1980-01-01", calendar="360_day")
     assert frequency.cube_frequency(cube) == "day"
+
+
+def test_a_monthly_series_mislabelled_as_a_climatology_is_monthly() -> None:
+    """GFDL-CM4's Amon files say `frequency = "monC"`; they are monthly means.
+
+    Read literally, `select_frequency(..., "mon")` dropped them wherever the
+    variable also existed daily, and every gate reading monthly `pr` or `rlut`
+    reported the variable missing (found on the CMIP6 amip runs).
+    """
+    monthly = _monthly()
+    monthly.attributes["frequency"] = "monC"
+    assert frequency.cube_frequency(monthly) == "mon"
+    cubes = CubeList([monthly, _daily()])
+    (selected,) = frequency.select_frequency(cubes, "mon")
+    assert selected is monthly
+
+    # A real climatology (twelve steps) keeps its label and is not a `mon` series.
+    climatology = monthly[:12]
+    assert frequency.cube_frequency(climatology) == "monC"
+

@@ -99,8 +99,27 @@ def cube_frequency(cube: Cube) -> str | None:
     """Return a cube's frequency: its CMOR attribute, else its time step."""
     attribute = cube.attributes.get("frequency")
     if attribute:
-        return normalise_frequency(str(attribute))
+        frequency = normalise_frequency(str(attribute))
+        # GFDL-CM4 labels its ordinary monthly-mean Amon files `monC`, the
+        # CMIP6 frequency of a monthly CLIMATOLOGY. A cube whose time axis
+        # steps by a month through the years is a monthly series whatever
+        # the label says (a real climatology has twelve steps).
+        if frequency == "monC" and _is_monthly_series(cube):
+            return "mon"
+        return frequency
     return _time_step_frequency(cube)
+
+
+#: A monthly climatology has twelve time steps; more is a series.
+_CLIMATOLOGY_STEPS = 12
+
+
+def _is_monthly_series(cube: Cube) -> bool:
+    try:
+        n_time = cube.coord("time").shape[0]
+    except Exception:  # noqa: BLE001 - iris raises CoordinateNotFoundError
+        return False
+    return n_time > _CLIMATOLOGY_STEPS and _time_step_frequency(cube) == "mon"
 
 
 def _has_time(cube: Cube) -> bool:
