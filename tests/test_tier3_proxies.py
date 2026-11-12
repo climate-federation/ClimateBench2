@@ -435,9 +435,10 @@ def test_midholocene_monsoon_gate_computes_the_north_africa_anomaly() -> None:
     lat = np.linspace(-85.0, 85.0, N_LAT)
     lon = np.linspace(5.0, 355.0, N_LON)
     # The box (10-30N, 20W-30E) and the cells bordering it are 0.8 mm/day
-    # wetter (on this 10-degree grid the extraction also takes cells whose
-    # bounds touch the box); everything well away from it is much drier, so a
-    # box taken on the wrong side of the meridian gives a negative number.
+    # wetter (the gate interpolates this 10-degree field to its 2-degree grid
+    # before taking the box, so the bordering cells bleed into it); everything
+    # well away is much drier, so a box taken on the wrong side of the
+    # meridian gives a negative number.
     near_box = ((lat >= 0.0) & (lat <= 40.0))[:, None] & ((lon >= 320.0) | (lon <= 50.0))[None, :]
     per_day = 1.0 / 86400.0  # kg m-2 s-1 per mm/day
     control = np.full((N_LAT, N_LON), 6.0 * per_day)
