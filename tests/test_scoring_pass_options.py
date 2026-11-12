@@ -399,3 +399,115 @@ def test_the_optional_columns_are_written_and_rescoring_is_idempotent(  # noqa: 
     assert len(third) == len(first)
     assert third["e_ref_mode"].isna().all()
     assert third["crps_ref_window"].isna().all()
+
+
+# ---------------------------------------------------------------------------
+# CB-8: the configured scored window
+# ---------------------------------------------------------------------------
+
+from climatebench2 import windows  # noqa: E402
+from test_scoring_pass import _offset_tables  # noqa: E402
+
+HINDCAST = "hindcast_entry"
+HINDCAST_YEARS = list(range(1900, 1991))
+HINDCAST_SWITCHES = {
+    "tier2": {
+        "scored_windows": {HINDCAST: [1940, 1978]},
+        "anomaly_baseline": {
+            "diagnostics": {HINDCAST: True},
+            "periods": {HINDCAST: [1900, 1930]},
+        },
+        "window_labels": {"diagnostics": {HINDCAST: "in-sample"}},
+    },
+}
+
+
+def test_the_default_scored_window_is_the_test_window() -> None:
+    assert windows.scored_window() == (2015, None)
+    assert windows.scored_window("anything") == (2015, None)
+    assert not windows.has_custom_scored_window(DIAGNOSTIC)
+    assert windows.anomaly_baseline_years(DIAGNOSTIC) == (1985, 2014)
+    first, last = windows.test_window_years()
+    assert first == 2015
+    assert last >= 2015
+
+
+def test_scored_window_key_sets_the_test_window_and_the_pass() -> None:
+    with use_thresholds({"tier2": {"scored_window": [2015, 2024]}}):
+        assert windows.test_window_years() == (2015, 2024)
+        assert windows.test_window_timerange() == "20150101/20241231"
+        assert windows.scored_window(DIAGNOSTIC) == (2015, 2024)
+        assert windows.window_lengths()["test"] == 10
+        raw, sources = _tables(np.random.default_rng(5))
+        rows = pd.DataFrame(
+            score_raw_output(raw, sources, settings=FAST, diagnostic=DIAGNOSTIC),
+        )
+    assert _row(rows, "MyModel", "to_benchmark")["n_time"] == 10
+    assert _row(rows, CLIMATOLOGY_DATA_ID, "baseline")["n_time"] == 10
+    with (
+        use_thresholds({"tier2": {"scored_window": [2024, 2015]}}),
+        pytest.raises(ValueError, match="scored_window"),
+    ):
+        windows.test_window_years()
+
+
+def test_one_entry_has_its_own_window_and_baseline() -> None:
+    raw, sources = _offset_tables(0.5, 3, years=HINDCAST_YEARS)
+    with use_thresholds(HINDCAST_SWITCHES):
+        assert windows.scored_window(HINDCAST) == (1940, 1978)
+        assert windows.scored_window(DIAGNOSTIC) == (2015, None)
+        assert windows.anomaly_baseline_years(HINDCAST) == (1900, 1930)
+        assert windows.anomaly_baseline_years(DIAGNOSTIC) == (1985, 2014)
+        context = scoring_pass.anomalise_raw_output(
+            raw,
+            None,
+            ["tas"],
+            diagnostic=HINDCAST,
+        )
+        rows = pd.DataFrame(
+            score_raw_output(raw, sources, settings=FAST, diagnostic=HINDCAST),
+        )
+    assert context.period == (1900, 1930)
+    assert context.window == (1940, 1978)
+    years = pd.to_datetime(context.raw["time"]).dt.year
+    assert (years.min(), years.max()) == (1940, 1978)
+    # anomalies about the entry's OWN period: the reference's 1900-1930 mean
+    reference = raw[raw["data_type"] == "reference"].set_index(
+        pd.to_datetime(raw[raw["data_type"] == "reference"]["time"]).dt.year,
+    )["tas"]
+    got = context.raw[context.raw["data_type"] == "reference"].set_index(
+        pd.to_datetime(context.raw[context.raw["data_type"] == "reference"]["time"]).dt.year,
+    )["tas"]
+    expected = reference.loc[1940:1978] - reference.loc[1900:1930].mean()
+    np.testing.assert_allclose(got.to_numpy(), expected.to_numpy(), atol=1e-12)
+
+    mine = _row(rows, "MyModel", "to_benchmark")
+    assert mine["n_time"] == 39
+    assert mine["window"] == "in-sample"  # tier2.window_labels, as today
+    assert np.isfinite(mine["crps"])
+    assert mine["crps"] < 0.2  # the 0.5 offset was removed
+    clim = _row(rows, CLIMATOLOGY_DATA_ID, "baseline")
+    assert clim["n_time"] == 39
+    assert clim["n_members"] == 31  # sampled from 1900-1930, not 1985-2014
+
+
+def test_an_entry_override_leaves_the_other_entries_alone() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    plain = pd.DataFrame(
+        score_raw_output(raw, sources, settings=FAST, diagnostic=DIAGNOSTIC),
+    )
+    with use_thresholds(HINDCAST_SWITCHES):
+        other = pd.DataFrame(
+            score_raw_output(raw, sources, settings=FAST, diagnostic=DIAGNOSTIC),
+        )
+    pd.testing.assert_frame_equal(plain, other)
+
+
+def test_a_window_on_an_absolute_entry_cuts_the_table() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    with use_thresholds({"tier2": {"scored_windows": {"plain": [2020, 2029]}}}):
+        rows = pd.DataFrame(
+            score_raw_output(raw, sources, settings=FAST, diagnostic="plain"),
+        )
+    assert _row(rows, "MyModel", "to_benchmark")["n_time"] == 10
+    assert _row(rows, CLIMATOLOGY_DATA_ID, "baseline")["n_time"] == 10

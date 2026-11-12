@@ -40,10 +40,68 @@ def timerange(first_year: int, last_year: int) -> str:
     return f"{int(first_year)}0101/{int(last_year)}1231"
 
 
+def _year_pair(value: object, key: str) -> tuple[int, int]:
+    """``[first, last]`` of a threshold as a validated pair of years."""
+    try:
+        first, last = (int(year) for year in value)  # type: ignore[attr-defined]
+    except (TypeError, ValueError):
+        msg = f"{key} must be [first_year, last_year], got {value!r}"
+        raise ValueError(msg) from None
+    if first > last:
+        msg = f"{key} must be [first_year, last_year], got {value!r}"
+        raise ValueError(msg)
+    return (first, last)
+
+
 def test_window_years(today: dt.date | None = None) -> tuple[int, int]:
-    """``(first, last)`` year of the reserved post-2015 test window."""
+    """``(first, last)`` year of the scored window (the reserved test window).
+
+    ``tier2.test_window_start`` → the last complete year, unless the optional
+    ``tier2.scored_window = [first, last]`` names another (an AMIP protocol that
+    scores 2015-2024). It is the window the CLI loads the scored suites over.
+    A per-entry override (``tier2.scored_windows``) is :func:`scored_window`.
+    """
+    custom = get_threshold("tier2.scored_window", None)
+    if custom is not None:
+        return _year_pair(custom, "tier2.scored_window")
     start = int(get_threshold("tier2.test_window_start"))
     return (start, max(last_complete_year(today), start))
+
+
+def scored_window(entry_name: str | None = None) -> tuple[int, int | None]:
+    """``(first, last)`` year one suite entry is **scored** on.
+
+    ``last`` is ``None`` for the default, open-ended window (every step from
+    ``tier2.test_window_start`` on, as ClimateBench2 has always scored). The
+    order of precedence: ``tier2.scored_windows[entry_name]`` (a hindcast entry
+    with its own window), then ``tier2.scored_window``, then the default.
+    """
+    per_entry = get_threshold("tier2.scored_windows", None) or {}
+    if entry_name is not None and entry_name in per_entry:
+        key = f"tier2.scored_windows.{entry_name}"
+        return _year_pair(per_entry[entry_name], key)
+    custom = get_threshold("tier2.scored_window", None)
+    if custom is not None:
+        return _year_pair(custom, "tier2.scored_window")
+    return (int(get_threshold("tier2.test_window_start")), None)
+
+
+def in_scored_window(years: object, window: tuple[int, int | None]) -> object:
+    """Boolean mask of the ``years`` (array) inside a :func:`scored_window`."""
+    import numpy as np  # noqa: PLC0415
+
+    years = np.asarray(years)
+    mask = years >= window[0]
+    if window[1] is not None:
+        mask = mask & (years <= window[1])
+    return mask
+
+
+def has_custom_scored_window(entry_name: str | None = None) -> bool:
+    """Whether ``entry_name`` is scored on anything but the default window."""
+    return scored_window(entry_name)[1] is not None or scored_window(entry_name)[
+        0
+    ] != int(get_threshold("tier2.test_window_start"))
 
 
 def test_window_timerange(today: dt.date | None = None) -> str:
@@ -117,6 +175,19 @@ def scores_anomalies(entry_name: str) -> bool:
     if entry_name in by_entry:
         return bool(by_entry[entry_name])
     return bool(table.get("default", False))
+
+
+def anomaly_baseline_years(entry_name: str | None = None) -> tuple[int, int]:
+    """``(first, last)`` year of the climatology one entry's anomalies are about.
+
+    ``tier2.anomaly_baseline.periods[entry_name]`` if given (a hindcast entry
+    anomalised about its own years), else the protocol baseline window.
+    """
+    periods = get_threshold("tier2.anomaly_baseline.periods", None) or {}
+    if entry_name is not None and entry_name in periods:
+        key = f"tier2.anomaly_baseline.periods.{entry_name}"
+        return _year_pair(periods[entry_name], key)
+    return baseline_window_years()
 
 
 def anomaly_min_baseline_years() -> int:

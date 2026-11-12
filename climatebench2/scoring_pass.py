@@ -620,7 +620,13 @@ class AnomalyContext:
         The table with every scorable value replaced by its anomaly about
         that ``data_id``'s **own** baseline-window climatology, and cut to
         the steps the protocol actually scores (``tier2.test_window_start``
-        onwards) — so ``n_time`` counts post-2015 steps and nothing else.
+        onwards, or the entry's own ``tier2.scored_window(s)``) — so
+        ``n_time`` counts scored steps and nothing else.
+    ``period`` / ``window``
+        The baseline period the anomalies are about and the scored window
+        the table was cut to (``windows.anomaly_baseline_years`` /
+        ``windows.scored_window`` of the entry; ``window[1]`` is ``None`` for
+        the open-ended default).
     ``baseline``
         The ``reference_baseline`` frames, shifted by the *same* offsets, so
         the Climatology baseline's pseudo-members live in the same anomaly
@@ -639,6 +645,8 @@ class AnomalyContext:
     baseline: dict[tuple[str, str], pd.DataFrame] | None
     missing: set[tuple[str, str]] = field(default_factory=set)
     reference_missing: set[str] = field(default_factory=set)
+    period: tuple[int, int] = (0, 0)
+    window: tuple[int, int | None] = (0, None)
 
 
 def baseline_climatology(
@@ -647,6 +655,7 @@ def baseline_climatology(
     *,
     monthly: bool,
     min_years: int | None = None,
+    period: tuple[int, int] | None = None,
 ) -> dict[int, float] | None:
     """One source's climatology over ``tier2.climatology_baseline_period``.
 
@@ -654,11 +663,12 @@ def baseline_climatology(
     for an annual one, or ``None`` when the record covers fewer than
     ``tier2.anomaly_baseline.min_years`` distinct years of the window — in
     which case the protocol does **not** score the source at all rather than
-    anomalise it about a climatology it does not have.
+    anomalise it about a climatology it does not have. ``period`` overrides
+    the protocol window (a suite entry with its own baseline).
     """
     if min_years is None:
         min_years = windows.anomaly_min_baseline_years()
-    first, last = windows.baseline_window_years()
+    first, last = period or windows.baseline_window_years()
     stamps = pd.to_datetime(pd.Series(times)).reset_index(drop=True)
     years = stamps.dt.year.to_numpy()
     in_window = (years >= first) & (years <= last) & np.isfinite(values)
@@ -700,6 +710,8 @@ def anomalise_raw_output(
     raw_df: pd.DataFrame,
     baseline: dict[tuple[str, str], pd.DataFrame] | None,
     var_columns: list[str],
+    *,
+    diagnostic: str = "",
 ) -> AnomalyContext:
     """Reduce a scored time-series table to anomalies, then cut to the window.
 
@@ -718,13 +730,23 @@ def anomalise_raw_output(
     shifted by the same offsets so the Climatology baseline stays in the
     same space.
 
-    Only then is the table cut to ``tier2.test_window_start`` onwards: the
-    baseline years define the anomaly, they are never scored.
+    Only then is the table cut to the scored window (``tier2.test_window_start``
+    onwards by default): the baseline years define the anomaly, they are never
+    scored. ``diagnostic`` (the suite entry name) selects an entry's own
+    ``tier2.scored_windows`` and ``tier2.anomaly_baseline.periods``; without
+    an override both are the protocol's.
     """
     frame = raw_df.reset_index(drop=True).copy()
     min_years = windows.anomaly_min_baseline_years()
-    first, last = windows.baseline_window_years()
-    context = AnomalyContext(raw=frame, baseline=dict(baseline or {}))
+    period = windows.anomaly_baseline_years(diagnostic)
+    first, last = period
+    window = windows.scored_window(diagnostic)
+    context = AnomalyContext(
+        raw=frame,
+        baseline=dict(baseline or {}),
+        period=period,
+        window=window,
+    )
     reference_ids = {
         str(i) for i in frame.loc[frame["data_type"] == "reference", "data_id"]
     }
@@ -755,6 +777,7 @@ def anomalise_raw_output(
                 values,
                 monthly=monthly,
                 min_years=min_years,
+                period=period,
             )
             own_window = offsets is not None
             if offsets is None and data_id in reference_ids:
@@ -763,6 +786,7 @@ def anomalise_raw_output(
                     column,
                     monthly=monthly,
                     min_years=min_years,
+                    period=period,
                 )
             if offsets is None:
                 context.missing.add((data_id, column))
@@ -802,8 +826,7 @@ def anomalise_raw_output(
                 years=(first, last),
             )
 
-    start = int(get_threshold("tier2.test_window_start"))
-    scored = pd.to_datetime(frame["time"]).dt.year >= start
+    scored = windows.in_scored_window(pd.to_datetime(frame["time"]).dt.year, window)
     context.raw = frame[scored].reset_index(drop=True)
     return context
 
@@ -814,6 +837,7 @@ def _recorded_climatology(
     *,
     monthly: bool,
     min_years: int,
+    period: tuple[int, int] | None = None,
 ) -> dict[int, float] | None:
     """The reference's climatology from its ``reference_baseline`` rows."""
     recorded = _baseline_window_series(baseline, column, monthly=monthly)
@@ -824,6 +848,7 @@ def _recorded_climatology(
         recorded[column].to_numpy(float),
         monthly=monthly,
         min_years=min_years,
+        period=period,
     )
 
 
@@ -1299,13 +1324,22 @@ def _climatology_row(
     baseline: dict[tuple[str, str], pd.DataFrame] | None = None,
     sigma: pd.Series | None = None,
     floor: float = 0.0,
+    period: tuple[int, int] | None = None,
+    window: tuple[int, int | None] | None = None,
 ) -> dict[str, Any]:
-    """Baseline (i) as a distribution (see :mod:`climatebench2.baselines`)."""
+    """Baseline (i) as a distribution (see :mod:`climatebench2.baselines`).
+
+    ``period`` is the baseline window it samples (default
+    ``tier2.climatology_baseline_period``) and ``window`` the steps it is
+    scored on (default: ``tier2.test_window_start`` onwards).
+    """
     ref = reference[["time", column]].dropna().sort_values("time")
     if ref.empty:
         return _empty_row(CLIMATOLOGY_DATA_ID, "baseline", column, "no reference")
     times = pd.to_datetime(ref["time"])
-    year_0, year_1 = get_threshold("tier2.climatology_baseline_period")
+    year_0, year_1 = period or get_threshold("tier2.climatology_baseline_period")
+    if window is None:
+        window = (int(get_threshold("tier2.test_window_start")), None)
     years = times.dt.year.to_numpy()
     monthly = is_monthly(ref["time"])
 
@@ -1333,7 +1367,7 @@ def _climatology_row(
 
     # Score the baseline on the reserved test window — the same target steps
     # the models are scored on, never on the window it was fitted to.
-    is_target = years >= int(get_threshold("tier2.test_window_start"))
+    is_target = windows.in_scored_window(years, window)
     if is_target.sum() < _MIN_OVERLAP:
         is_target = (years < int(year_0)) | (years > int(year_1))
     if is_target.sum() < _MIN_OVERLAP:
@@ -1413,6 +1447,8 @@ def _pattern_scaling_row(
     baseline: dict[tuple[str, str], pd.DataFrame] | None = None,
     sigma: pd.Series | None = None,
     floor: float = 0.0,
+    period: tuple[int, int] | None = None,
+    window: tuple[int, int | None] | None = None,
 ) -> dict[str, Any] | None:
     """Baseline (iii): the calibrated two-layer EBM, as an ensemble.
 
@@ -1444,7 +1480,11 @@ def _pattern_scaling_row(
     def _reason(text: str) -> dict[str, Any]:
         return _empty_row(PATTERN_SCALING_DATA_ID, "baseline", column, text)
 
-    first, last = (int(y) for y in get_threshold("tier2.climatology_baseline_period"))
+    first, last = (
+        int(y) for y in (period or get_threshold("tier2.climatology_baseline_period"))
+    )
+    if window is None:
+        window = (int(get_threshold("tier2.test_window_start")), None)
     end = int(get_threshold("tier2.pattern_scaling.calibration_end_year"))
     minimum = int(get_threshold("tier2.pattern_scaling.min_calibration_years"))
     years, values = _annual_observed_record(reference, column, baseline)
@@ -1484,8 +1524,9 @@ def _pattern_scaling_row(
     # Score it on the reserved test window — the steps the models are scored
     # on — never on the years it was calibrated to.
     target_years = pd.to_datetime(ref["time"]).dt.year.to_numpy()
-    covered = np.isin(target_years, calibration.years) & (
-        target_years >= int(get_threshold("tier2.test_window_start"))
+    covered = np.isin(target_years, calibration.years) & windows.in_scored_window(
+        target_years,
+        window,
     )
     if covered.sum() < _MIN_OVERLAP:
         return _reason(
@@ -1790,6 +1831,8 @@ def _climatology_baseline(context: BaselineContext) -> dict[str, Any] | None:
         baseline=context.baseline_records,
         sigma=context.sigma_obs,
         floor=context.sigma_floor,
+        period=context.baseline_period,
+        window=context.window,
     )
 
 
@@ -1807,6 +1850,8 @@ def _pattern_scaling_baseline(context: BaselineContext) -> dict[str, Any] | None
         baseline=context.baseline_records,
         sigma=context.sigma_obs,
         floor=context.sigma_floor,
+        period=context.baseline_period,
+        window=context.window,
     )
 
 
@@ -2069,14 +2114,41 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
 
     carriers = variable_carriers(raw_df, var_columns)
     anomalies = windows.scores_anomalies(diagnostic)
+    period = windows.anomaly_baseline_years(diagnostic)
+    window = windows.scored_window(diagnostic)
     no_baseline: set[tuple[str, str]] = set()
     unscorable: list[str] = []
     if anomalies:
-        context = anomalise_raw_output(raw_df, baseline, var_columns)
+        context = anomalise_raw_output(
+            raw_df,
+            baseline,
+            var_columns,
+            diagnostic=diagnostic,
+        )
         raw_df, baseline = context.raw, context.baseline
         no_baseline = context.missing
         unscorable = [c for c in var_columns if c in context.reference_missing]
         var_columns = [c for c in var_columns if c not in context.reference_missing]
+    elif windows.has_custom_scored_window(diagnostic):
+        # Absolute series are normally cut by the load window alone; a
+        # configured window is enforced here as well.
+        # The reference's own baseline-period rows are kept as the Climatology
+        # sample before they are cut away.
+        own = AnomalyContext(raw=raw_df, baseline=dict(baseline or {}), period=period)
+        full_references = raw_df[raw_df["data_type"] == "reference"]
+        for column in var_columns:
+            full = reference_for_variable(full_references, column)
+            if full is not None:
+                _record_own_baseline(
+                    own,
+                    full,
+                    column,
+                    monthly=is_monthly(full[["time", column]].dropna()["time"]),
+                    years=period,
+                )
+        baseline = own.baseline
+        keep = windows.in_scored_window(pd.to_datetime(raw_df["time"]).dt.year, window)
+        raw_df = raw_df[keep].reset_index(drop=True)
 
     references = raw_df[raw_df["data_type"] == "reference"]
     if references.empty and not unscorable:
@@ -2225,10 +2297,8 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
                 sigma_obs=sigma,
                 sigma_floor=floor,
                 baseline_records=baseline,
-                baseline_period=tuple(
-                    int(y) for y in get_threshold("tier2.climatology_baseline_period")
-                ),
-                window=(int(get_threshold("tier2.test_window_start")), None),
+                baseline_period=period,
+                window=window,
                 raw=raw_df,
             ),
             scored,

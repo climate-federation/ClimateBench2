@@ -94,6 +94,12 @@ climatebench2/
   `skill` over those years; adds `crps_ref_window`, `e_ref_window`; `e_ref_mode` only when
   not the default). EOF/scalar tables keep their full-record value. None of this is in
   `thresholds.yml` (the frozen-comparison fingerprint must not move).
+- Optional `tier2.scored_window` (`[first, last]`, default: `test_window_start` → last
+  complete year; `windows.test_window_years` follows it), `tier2.scored_windows:
+  {<entry>: [first, last]}` and `tier2.anomaly_baseline.periods: {<entry>: [first, last]}`
+  (`windows.scored_window(entry)`, `windows.anomaly_baseline_years(entry)`): the pass
+  anomalises about the entry's own period and scores its own window. The CLI/reference
+  load windows do not read the per-entry keys yet.
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
   `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
   `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so
