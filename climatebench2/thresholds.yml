@@ -696,6 +696,8 @@ tier3:
   # TODO(Duncan): both are CB2 defaults, not paper values. 30 yr matches the
   # conventional PMIP4 climatology; 100 yr of spin-up is the usual PMIP4
   # equilibration allowance for a run branched from an equilibrated control.
+  # A diagnostic repointed with `_threshold_block` may state its own `spinup_years`
+  # / `block_years` in that block (a fixed-SST run: 5); absent there, these apply.
   block_years: 30
   spinup_years: 100
   min_pseudo_members: 2                # fair CRPS is undefined below this

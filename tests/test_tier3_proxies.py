@@ -381,3 +381,41 @@ def test_a_missing_variable_in_the_file_is_a_reason(tmp_path) -> None:  # noqa: 
     metrics, _ = _run(tmp_path, dataset="Synth_tas", var_name="tos")
     (row,) = metrics.to_dict("records")
     assert "carries no variable 'tos'" in row["reason"]
+
+
+# ---------------------------------------------------------------------------
+# CB-10: spin-up (and block length) can be overridden by the gate's own block
+# ---------------------------------------------------------------------------
+
+
+def test_a_gates_own_block_overrides_the_global_spinup(tmp_path) -> None:  # noqa: ANN001
+    from climatebench2._thresholds import use_thresholds
+
+    _site_file(tmp_path / "lgm" / "Synth_tas.nc")
+
+    class FixedSSTProxyScore(PaleoProxyScore):
+        _threshold_block = "fixed_sst.tier3"
+
+    def run(cls, years):  # noqa: ANN001, ANN202
+        diag = cls(
+            "lgm_synth_tas",
+            period_key="lgm",
+            dataset="Synth_tas",
+            var_name="tas",
+            paleo_data_root=tmp_path,
+            fail_on_missing_data=True,
+        )
+        out = diag.get_output(_experiments(n_years=years), _info())
+        return out.metrics.to_pandas().set_index("var_id").loc["lgm_Synth_tas_tas"]
+
+    overlay = {"fixed_sst": {"tier3": {"spinup_years": 5}}}
+    with use_thresholds(overlay):
+        # 150 yr: the global 100 yr spin-up leaves one block; the override 5 yr leaves four
+        assert run(FixedSSTProxyScore, 150)["n_members"] == 4
+        assert "pseudo-member" in run(PaleoProxyScore, 150)["reason"]
+    # without the layer the subclass falls back to the global value
+    assert "pseudo-member" in run(FixedSSTProxyScore, 150)["reason"]
+
+    # block_years is read the same way
+    with use_thresholds({"fixed_sst": {"tier3": {"spinup_years": 0, "block_years": 50}}}):
+        assert run(FixedSSTProxyScore, 150)["n_members"] == 3

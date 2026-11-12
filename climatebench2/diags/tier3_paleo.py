@@ -65,7 +65,7 @@ from climateeval.diags._base import DiagnosticOutput
 
 from climatebench2 import scoring
 from climatebench2._thresholds import get_threshold
-from climatebench2.diags.pass_fail import GateCheck, Threshold
+from climatebench2.diags.pass_fail import GateCheck, Threshold, effective_block
 from climatebench2.diags.tier1_physics import (
     CB2ComplexDiagnostic,
     _cube_years_months,
@@ -487,6 +487,18 @@ class PaleoProxyScore(_ScoreRowMixin, CB2ComplexDiagnostic):
 
     # -- inputs -------------------------------------------------------------
 
+    def _block_override(self, name: str) -> Any:  # noqa: ANN401
+        """``tier3.<name>`` unless this diagnostic's own block states it.
+
+        ``_threshold_block`` (``effective_block(self, "tier3")``) names the
+        block a protocol points the diagnostic at; a ``spinup_years`` or
+        ``block_years`` there overrides the global ``tier3`` value, so a
+        fixed-SST run can drop 5 spin-up years while the coupled default stays
+        100. With no ``_threshold_block`` the global value is read.
+        """
+        block = effective_block(self, "tier3")
+        return get_threshold(f"{block}.{name}", get_threshold(f"tier3.{name}"))
+
     @property
     def _key(self) -> str:
         """``var_id`` prefix identifying this (period, dataset, variable)."""
@@ -604,8 +616,8 @@ class PaleoProxyScore(_ScoreRowMixin, CB2ComplexDiagnostic):
         data = complex_data_source.data
         annual = self._annual_field(data[self._period_key])
         control = self._control_climatology(data[self.keys["control"]])
-        block_years = int(get_threshold("tier3.block_years"))
-        spinup = int(get_threshold("tier3.spinup_years"))
+        block_years = int(self._block_override("block_years"))
+        spinup = int(self._block_override("spinup_years"))
         blocks = scoring.block_climatologies(annual, block_years, spinup=spinup)
         min_members = int(get_threshold("tier3.min_pseudo_members"))
         if blocks.shape[0] < min_members:

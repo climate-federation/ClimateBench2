@@ -82,6 +82,8 @@ climatebench2/
 - Optional switch `tier2.internal_variability.source` (`picontrol` default | `ensemble_spread`):
   with `ensemble_spread`, `InternalVariability` emits nothing and the scoring pass takes
   sigma_int from `scoring.ensemble_spread_sigma(members, statistic)` (NaN below 3 members).
+- `tier3.spinup_years` / `tier3.block_years` are read through `PaleoProxyScore._block_override`:
+  the diagnostic's own `_threshold_block` may override them (fixed-SST paleo: 5 spin-up years).
 - Multi-experiment inputs follow the `ECS` `ComplexDiagnostic` pattern
   (`_required_data_keys` + `ComplexDataSource`). CB2 complex diagnostics accept a
   *superset* of their required keys so one experiment dict feeds a whole suite.
