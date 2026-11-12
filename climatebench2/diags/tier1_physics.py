@@ -38,6 +38,7 @@ from loguru import logger
 from climateeval import Variable
 from climateeval._config import setup_esmvaltool_config_and_logging
 from climateeval._utils import get_prepared_cube
+from climateeval.data import ComplexDataSource
 from climateeval.diags._utils import DEFAULT_GRID
 from climateeval.diags.complex import (
     ECS,
@@ -51,6 +52,7 @@ from climatebench2 import physics
 from climatebench2._thresholds import get_threshold
 from climatebench2.diags.pass_fail import (
     Band,
+    ExperimentKeysMixin,
     GateCheck,
     GateMixin,
     SupersetExperimentMixin,
@@ -63,7 +65,6 @@ if TYPE_CHECKING:
     from iris.cube import CubeList
     from xarray import Dataset
 
-    from climateeval.data import ComplexDataSource
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,12 @@ def _mon(name: str) -> Variable:
     return Variable(name, name, "mon")
 
 
-class CB2ComplexDiagnostic(SupersetExperimentMixin, GateMixin, ComplexDiagnostic):
+class CB2ComplexDiagnostic(
+    SupersetExperimentMixin,
+    ExperimentKeysMixin,
+    GateMixin,
+    ComplexDiagnostic,
+):
     """Base for the Tier I gates: superset data keys + esmvalcore helpers."""
 
     # -- preprocessing helpers (all regrid to the common 2x2 grid first) ----
@@ -241,7 +247,7 @@ class CB2ComplexDiagnostic(SupersetExperimentMixin, GateMixin, ComplexDiagnostic
 # ---------------------------------------------------------------------------
 
 
-class _UpstreamGate(SupersetExperimentMixin, GateMixin):
+class _UpstreamGate(SupersetExperimentMixin, ExperimentKeysMixin, GateMixin):
     """Common base of the CB2 wrappers over ClimateEval complex diagnostics.
 
     ``_threshold_kwargs`` maps an upstream keyword argument to its
@@ -251,12 +257,39 @@ class _UpstreamGate(SupersetExperimentMixin, GateMixin):
 
     _threshold_kwargs: ClassVar[dict[str, str]] = {}
 
+    #: ``role -> key`` the upstream diagnostic reads from its data dict. A
+    #: subclass remaps ``keys`` (role -> key in the *suite's* data dict); this
+    #: wrapper then hands upstream a view of the data under the keys it expects.
+    _upstream_keys: ClassVar[dict[str, str]] = {}
+
     def __init__(self, name: str, **kwargs: Any) -> None:
         """Initialize class instance with the protocol's constants."""
         for kwarg, threshold_key in self._threshold_kwargs.items():
             if kwarg not in kwargs:
                 kwargs[kwarg] = self._threshold(threshold_key)
         super().__init__(name, **kwargs)
+
+    def _upstream_view(self, source: ComplexDataSource) -> ComplexDataSource:
+        """``source`` with its experiments under the keys upstream expects.
+
+        Unchanged when ``keys`` is the default, or when ``source`` does not
+        carry this gate's keys — upstream's own comparison-ensemble sources
+        already use upstream's keys.
+        """
+        wanted = {role: self.keys[role] for role in self._upstream_keys}
+        if wanted == self._upstream_keys or not set(wanted.values()) <= set(source.data):
+            return source
+        view = {up: source.data[wanted[role]] for role, up in self._upstream_keys.items()}
+        return ComplexDataSource(data=view, information=source.information)
+
+    def _calculate_raw_output(
+        self,
+        complex_data_source: ComplexDataSource,
+    ) -> dict[Variable, Cube]:
+        """Upstream's computation, on the data seen under upstream's keys."""
+        return super()._calculate_raw_output(  # type: ignore[misc,no-any-return]
+            self._upstream_view(complex_data_source),
+        )
 
     def _get_other_data(self) -> Generator[ComplexDataSource]:
         """Upstream's CMIP6 comparison ensemble, unless it is switched off.
@@ -278,6 +311,8 @@ class _UpstreamGate(SupersetExperimentMixin, GateMixin):
 class ECSGate(_UpstreamGate, ECS):
     """I.6c: ECS (Gregory, 150 yr) ∈ tier1.ecs.range = [1, 7] K."""
 
+    keys: ClassVar[dict[str, str]] = {"abrupt": "4xco2", "control": "picontrol"}
+    _upstream_keys: ClassVar[dict[str, str]] = {"abrupt": "4xco2", "control": "picontrol"}
     _gate_checks = (
         GateCheck(
             check_id="ecs_gate",
@@ -305,7 +340,7 @@ class EnergyBalanceGate(CB2ComplexDiagnostic):
     of years actually used is emitted as ``n_years``.
     """
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
     _gate_checks = (
         GateCheck(
             check_id="energy_balance_mean",
@@ -325,7 +360,7 @@ class EnergyBalanceGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         n = self._toa_net_annual_global(picontrol)
         n_eval = int(self._threshold("tier1.energy_balance.evaluation_years"))
         if n.size < n_eval:
@@ -353,7 +388,7 @@ class EnergyBalanceGate(CB2ComplexDiagnostic):
 class ClosureGate(CB2ComplexDiagnostic):
     """I.2a/b: water budget < 0.05 mm/day; atm energy budget < 2 W/m²."""
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
     _gate_checks = (
         GateCheck(
             check_id="water_budget",
@@ -373,7 +408,7 @@ class ClosureGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         means = {
             name: float(self._annual_global_series(picontrol, _mon(name)).mean())
             for name in (
@@ -437,7 +472,7 @@ class ClearSkyFeedbackGate(CB2ComplexDiagnostic):
     actually used is emitted as ``clear_sky_lw_feedback_n_years``.
     """
 
-    _required_data_keys = ("picontrol", "4xco2")
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol", "abrupt": "4xco2"}
 
     _gate_checks = (
         GateCheck(
@@ -457,16 +492,16 @@ class ClearSkyFeedbackGate(CB2ComplexDiagnostic):
         n_years = int(self._threshold("tier1.clear_sky_lw_feedback.n_years"))
 
         pi_rlutcs, _pi_rlutcs_years = self._annual_global_series_years(
-            data["picontrol"],
+            data[self.keys["control"]],
             _mon("rlutcs"),
         )
         pi_ts, _pi_ts_years = self._annual_global_series_years(
-            data["picontrol"],
+            data[self.keys["control"]],
             _mon("ts"),
         )
 
-        a4x_rlutcs = self._annual_global_series(data["4xco2"], _mon("rlutcs"))
-        a4x_ts = self._annual_global_series(data["4xco2"], _mon("ts"))
+        a4x_rlutcs = self._annual_global_series(data[self.keys["abrupt"]], _mon("rlutcs"))
+        a4x_ts = self._annual_global_series(data[self.keys["abrupt"]], _mon("ts"))
         n_available = min(a4x_rlutcs.size, a4x_ts.size)
         n = min(n_available, n_years)
         if n_available < n_years:
@@ -505,6 +540,8 @@ class LandOceanWarmingGate(_UpstreamGate, LandOceanWarmingRatio):
     2026-09 paper draft.
     """
 
+    keys: ClassVar[dict[str, str]] = {"abrupt": "4xco2", "control": "picontrol"}
+    _upstream_keys: ClassVar[dict[str, str]] = {"abrupt": "4xco2", "control": "picontrol"}
     _threshold_kwargs: ClassVar[dict[str, str]] = {
         "equilibrium_years": "tier1.land_ocean_warming.equilibrium_years",
     }
@@ -525,6 +562,8 @@ class ArcticAmplificationGate(_UpstreamGate, ArcticAmplification):
     Thin gate over ``climateeval.diags.complex.ArcticAmplification``.
     """
 
+    keys: ClassVar[dict[str, str]] = {"abrupt": "4xco2", "control": "picontrol"}
+    _upstream_keys: ClassVar[dict[str, str]] = {"abrupt": "4xco2", "control": "picontrol"}
     _threshold_kwargs: ClassVar[dict[str, str]] = {
         "equilibrium_years": "tier1.arctic_amplification.equilibrium_years",
         "arctic_latitude": "tier1.arctic_amplification.lat_min",
@@ -566,7 +605,7 @@ class AerosolForcingGate(CB2ComplexDiagnostic):
     regression (negative, hence the minus sign; see the doc's sign nit).
     """
 
-    _required_data_keys = ("picontrol", "4xco2", "histaer")
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol", "abrupt": "4xco2", "aerosol": "histaer"}
 
     _gate_checks = (
         GateCheck(
@@ -704,13 +743,13 @@ class AerosolForcingGate(CB2ComplexDiagnostic):
         n_years_ecs = int(get_threshold("tier1.ecs.n_years"))
 
         pi_tas, pi_tas_years = self._annual_global_series_years(
-            data["picontrol"],
+            data[self.keys["control"]],
             _mon("tas"),
         )
-        pi_n, pi_n_years = self._toa_net_annual_global_years(data["picontrol"])
+        pi_n, pi_n_years = self._toa_net_annual_global_years(data[self.keys["control"]])
 
-        a4x_tas = self._annual_global_series(data["4xco2"], _mon("tas"))
-        a4x_n = self._toa_net_annual_global(data["4xco2"])
+        a4x_tas = self._annual_global_series(data[self.keys["abrupt"]], _mon("tas"))
+        a4x_n = self._toa_net_annual_global(data[self.keys["abrupt"]])
         n = min(a4x_tas.size, a4x_n.size, n_years_ecs)
         lambda_4x, _f4x, _r2 = physics.gregory_regression(
             a4x_tas[:n] - pi_tas.mean(),
@@ -718,10 +757,10 @@ class AerosolForcingGate(CB2ComplexDiagnostic):
         )
 
         aer_tas, aer_tas_years = self._annual_global_series_years(
-            data["histaer"],
+            data[self.keys["aerosol"]],
             _mon("tas"),
         )
-        aer_n, aer_n_years = self._toa_net_annual_global_years(data["histaer"])
+        aer_n, aer_n_years = self._toa_net_annual_global_years(data[self.keys["aerosol"]])
         years = np.intersect1d(aer_tas_years, aer_n_years)
         aer_tas = aer_tas[np.isin(aer_tas_years, years)]
         aer_n = aer_n[np.isin(aer_n_years, years)]
@@ -741,7 +780,7 @@ class AerosolForcingGate(CB2ComplexDiagnostic):
         in_window = (years >= first) & (years <= last)
 
         baseline_tas, baseline_n, parallel = self._control_baseline(
-            data["histaer"],
+            data[self.keys["aerosol"]],
             (first, last),
             int(years[0]),
             (pi_tas, pi_tas_years),
@@ -777,6 +816,9 @@ class MeridionalHeatTransportGate(_UpstreamGate, MeridionalHeatTransport):
     comparison ensemble); the NH peak-search bands come from
     ``thresholds.yml`` rather than the upstream defaults.
     """
+
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
+    _upstream_keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
 
     _threshold_kwargs: ClassVar[dict[str, str]] = {
         "amet_search_band": "tier1.meridional_heat_transport.amet_search_band",
@@ -837,7 +879,7 @@ class ITCZEFEGate(CB2ComplexDiagnostic):
     monthly timestep and carried a hard-coded array-length bug).
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
 
     _gate_checks = (
         GateCheck(
@@ -874,7 +916,7 @@ class ITCZEFEGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        historical = complex_data_source.data["historical"]
+        historical = complex_data_source.data[self.keys["historical"]]
 
         parts = {
             name: self._monthly_clim_zonal(historical, _mon(name))
@@ -920,7 +962,7 @@ class ITCZEFEGate(CB2ComplexDiagnostic):
 class BjerknesGate(CB2ComplexDiagnostic):
     """Extra: decadal AMET–OMET anti-correlation at 40–70N (r < −0.3)."""
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
     _band: ClassVar[tuple[float, float]] = (40.0, 70.0)
 
     _gate_checks = (
@@ -967,7 +1009,7 @@ class BjerknesGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        amet, omet = self._band_transport_series(complex_data_source.data["picontrol"])
+        amet, omet = self._band_transport_series(complex_data_source.data[self.keys["control"]])
         r = physics.bjerknes_correlation(amet, omet)
         return self._scalar_outputs({"bjerknes_r": r})
 
@@ -975,7 +1017,7 @@ class BjerknesGate(CB2ComplexDiagnostic):
 class CCScalingGate(CB2ComplexDiagnostic):
     """Extra: Clausius–Clapeyron scaling Δprw vs Δtas slope in 7 ± 2 %/K."""
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
     _gate_checks = (
         GateCheck(
             check_id="cc_scaling",
@@ -990,7 +1032,7 @@ class CCScalingGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         prw = self._annual_global_series(picontrol, _mon("prw"))
         tas = self._annual_global_series(picontrol, _mon("tas"))
         n = min(prw.size, tas.size)

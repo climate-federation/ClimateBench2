@@ -73,6 +73,12 @@ climatebench2/
   Arctic amplification, meridional heat transport), the CB2 gate is a **thin wrapper
   subclassing the upstream diagnostic** (`GateMixin`) that feeds `thresholds.yml`
   constants into its kwargs and gates its output columns. Never copy the physics.
+- **Experiment keys are indirected.** Every complex gate has `keys: ClassVar[dict[str, str]]`
+  (role -> data key, CB2 defaults: `control: picontrol`, `abrupt: 4xco2`, `historical`, ...),
+  reads `data[self.keys["control"]]`, and `_required_data_keys` is derived from `keys`
+  (`pass_fail.ExperimentKeysMixin`), so a subclass overrides `keys` only. `_UpstreamGate`
+  wrappers also set `_upstream_keys` (role -> key upstream reads) and present upstream a view
+  of the data under those keys. `optional_keys` lists non-required roles.
 - Multi-experiment inputs follow the `ECS` `ComplexDiagnostic` pattern
   (`_required_data_keys` + `ComplexDataSource`). CB2 complex diagnostics accept a
   *superset* of their required keys so one experiment dict feeds a whole suite.

@@ -170,7 +170,7 @@ class GeostrophicBalanceGate(CB2ComplexDiagnostic):
     the level at 850 hPa and handles masking in code).
     """
 
-    _required_data_keys = ("day",)
+    keys: ClassVar[dict[str, str]] = {"day": "day"}
     _pressure_level_pa: ClassVar[float] = 85000.0
     _ps_mask_pa: ClassVar[float] = 87000.0
 
@@ -193,7 +193,7 @@ class GeostrophicBalanceGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        daily = complex_data_source.data["day"]
+        daily = complex_data_source.data[self.keys["day"]]
         ua = self._level_cube(daily, "ua")
         zg = self._level_cube(daily, "zg")
         # The two are rarely published over the same period, so pair them by
@@ -242,7 +242,7 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
     fixed-SST experiments (GFMIP protocol; not in the CMIP6 archive).
     """
 
-    _required_data_keys = ("amip", "patch_ep", "patch_wp")
+    keys: ClassVar[dict[str, str]] = {"amip": "amip", "patch_ep": "patch_ep", "patch_wp": "patch_wp"}
     _gate_checks = (
         GateCheck(
             check_id="gfmip_patch",
@@ -272,8 +272,8 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
         data = complex_data_source.data
-        lam_ep = self._lambda_vs_amip(data["patch_ep"], data["amip"])
-        lam_wp = self._lambda_vs_amip(data["patch_wp"], data["amip"])
+        lam_ep = self._lambda_vs_amip(data[self.keys["patch_ep"]], data[self.keys["amip"]])
+        lam_wp = self._lambda_vs_amip(data[self.keys["patch_wp"]], data[self.keys["amip"]])
         return self._scalar_outputs(
             {
                 "delta_lambda": lam_ep - lam_wp,
@@ -291,7 +291,7 @@ class GFMIPPatchGate(CB2ComplexDiagnostic):
 class Amip4xCO2ERFGate(CB2ComplexDiagnostic):
     """I.4b: fixed-SST ERF (amip-4xCO2 − amip TOA net) ∈ [6.5, 9.0] W/m²."""
 
-    _required_data_keys = ("amip", "amip4xco2")
+    keys: ClassVar[dict[str, str]] = {"amip": "amip", "amip4xco2": "amip4xco2"}
     _gate_checks = (
         GateCheck(
             check_id="amip_4xco2_erf",
@@ -312,7 +312,7 @@ class Amip4xCO2ERFGate(CB2ComplexDiagnostic):
             n = self._toa_net_annual_global(exp)
             return float(n.mean())
 
-        erf = toa_net_mean(data["amip4xco2"]) - toa_net_mean(data["amip"])
+        erf = toa_net_mean(data[self.keys["amip4xco2"]]) - toa_net_mean(data[self.keys["amip"]])
         return self._scalar_outputs({"erf_wm2": erf})
 
 
@@ -354,7 +354,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
     "not run" state the scorecard already renders as a hole.
     """
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
 
     #: 30S–30N (paper: extratropical teleconnections are explicitly not gated).
     _band: ClassVar[tuple[float, float]] = (-30.0, 30.0)
@@ -533,7 +533,7 @@ class ENSOTeleconnectionsGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         model, lats, nino34_sigma = self._model_patterns(picontrol)
 
         values: dict[str, float] = {"nino34_std": nino34_sigma}
@@ -665,7 +665,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
     mm/day per MJ/m² (r ≈ 0.48).
     """
 
-    _required_data_keys = ("historical",)
+    keys: ClassVar[dict[str, str]] = {"historical": "historical"}
 
     #: 20S–20N (paper I.3c).
     _band: ClassVar[tuple[float, float]] = (-20.0, 20.0)
@@ -1040,7 +1040,7 @@ class PrecipBuoyancyGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        historical = complex_data_source.data["historical"]
+        historical = complex_data_source.data[self.keys["historical"]]
         pr, ta, hus = (
             self._model_cube(historical, name) for name in ("pr", "ta", "hus")
         )
@@ -1095,7 +1095,7 @@ class MJOGate(CB2ComplexDiagnostic):
     daily precipitation > 1.5.
     """
 
-    _required_data_keys = ("day",)
+    keys: ClassVar[dict[str, str]] = {"day": "day"}
     _gate_checks = (
         GateCheck(
             check_id="mjo_east_west",
@@ -1109,7 +1109,7 @@ class MJOGate(CB2ComplexDiagnostic):
         self,
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
-        daily = complex_data_source.data["day"]
+        daily = complex_data_source.data[self.keys["day"]]
         cube = self._cube(daily, _day("pr"))
         with setup_esmvaltool_config_and_logging():
             cube = extract_region(

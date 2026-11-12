@@ -323,6 +323,41 @@ def _gate_row(check: GateCheck, **fields: Any) -> dict[str, Any]:
     }
 
 
+class ExperimentKeysMixin:
+    """Experiment-key indirection: a gate reads ``data[self.keys[role]]``.
+
+    ``keys`` maps a **role** (``control``, ``historical``, ``abrupt``,
+    ``aerosol``, ``day``, ``amip``, ...) to the key of that experiment in the
+    suite's data dict; the values are ClimateBench2's. ``_required_data_keys``
+    is derived from ``keys`` (in ``__init_subclass__``), so a subclass remaps
+    its experiments by overriding ``keys`` alone::
+
+        class AmipClosureGate(ClosureGate):
+            keys = {"control": "amip"}
+
+    ``optional_keys`` maps roles the gate can use but does not require to
+    their default keys; they are never part of ``_required_data_keys``.
+    A subclass must keep every role of its parent (it may add roles).
+    """
+
+    keys: ClassVar[dict[str, str]] = {}
+    optional_keys: ClassVar[dict[str, str]] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # noqa: ANN401
+        """Derive ``_required_data_keys`` from an overridden ``keys``."""
+        parent_roles = set().union(
+            *(set(getattr(base, "keys", {}) or ()) for base in cls.__bases__),
+        )
+        super().__init_subclass__(**kwargs)
+        if "keys" not in cls.__dict__:
+            return
+        missing = parent_roles - set(cls.keys)
+        if missing:
+            msg = f"{cls.__name__}.keys must keep the roles {sorted(missing)} of its base"
+            raise TypeError(msg)
+        cls._required_data_keys = tuple(dict.fromkeys(cls.keys.values()))  # type: ignore[attr-defined]
+
+
 def gate_metrics(
     raw_df: pd.DataFrame,
     checks: tuple[GateCheck, ...],

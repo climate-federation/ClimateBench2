@@ -187,13 +187,13 @@ class InternalVariability(CB2ComplexDiagnostic):
     pass/fail row and can never touch the entry ticket.
     """
 
-    _required_data_keys = ("picontrol",)
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
     #: Protocol standing (thresholds.yml), read rather than hard-coded. This
     #: diagnostic defines no ``_gate_checks``: it reports numbers only.
     requirement: ClassVar[str] = BlockTag("tier2.internal_variability")  # type: ignore[assignment]
 
     def _calculate_raw_output(self, complex_data_source: Any) -> dict[Any, Any]:
-        picontrol = complex_data_source.data["picontrol"]
+        picontrol = complex_data_source.data[self.keys["control"]]
         lengths = windows.window_lengths()
         min_chunks = int(get_threshold("tier2.internal_variability.min_chunks"))
         outputs: dict[str, float] = {

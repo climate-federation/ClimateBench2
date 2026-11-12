@@ -296,7 +296,7 @@ class MidHoloceneMonsoonGate(CB2ComplexDiagnostic):
     is *not* the JJAS quantity the gate bounds. It is reported, never gated.
     """
 
-    _required_data_keys = ("midholocene", "picontrol")
+    keys: ClassVar[dict[str, str]] = {"midholocene": "midholocene", "control": "picontrol"}
 
     _gate_checks = (
         GateCheck(
@@ -391,12 +391,12 @@ class MidHoloceneMonsoonGate(CB2ComplexDiagnostic):
         complex_data_source: ComplexDataSource,
     ) -> dict[Variable, Cube]:
         data = complex_data_source.data
-        jjas = self._region_mean(data["midholocene"], JJAS_MONTHS) - self._region_mean(
-            data["picontrol"],
+        jjas = self._region_mean(data[self.keys["midholocene"]], JJAS_MONTHS) - self._region_mean(
+            data[self.keys["control"]],
             JJAS_MONTHS,
         )
-        annual = self._region_mean(data["midholocene"], ALL_MONTHS) - self._region_mean(
-            data["picontrol"],
+        annual = self._region_mean(data[self.keys["midholocene"]], ALL_MONTHS) - self._region_mean(
+            data[self.keys["control"]],
             ALL_MONTHS,
         )
         return self._scalar_outputs(
@@ -452,14 +452,17 @@ class PaleoProxyScore(_ScoreRowMixin, CB2ComplexDiagnostic):
       (``tier3.paleo_data_root``; ``score --paleo-data-root DIR`` overrides).
     """
 
-    _required_data_keys: ClassVar[tuple[str, ...]] = ("picontrol",)  # + period_key
+    keys: ClassVar[dict[str, str]] = {"control": "picontrol"}
+    #: The time-slice experiment is chosen per suite stanza (``period_key``);
+    #: this is the key used when a stanza names none.
+    optional_keys: ClassVar[dict[str, str]] = {"period": "lgm"}
     _gate_checks = ()
 
     def __init__(
         self,
         name: str,
         *,
-        period_key: str = "lgm",
+        period_key: str | None = None,
         dataset: str = "",
         var_name: str = "tas",
         model_var: str | None = None,
@@ -470,7 +473,7 @@ class PaleoProxyScore(_ScoreRowMixin, CB2ComplexDiagnostic):
     ) -> None:
         """Initialize class instance."""
         super().__init__(name, **kwargs)
-        self._period_key = period_key
+        self._period_key = period_key or self.optional_keys["period"]
         self._dataset = dataset
         self._var_name = var_name
         self._model_var = model_var or var_name
@@ -496,7 +499,7 @@ class PaleoProxyScore(_ScoreRowMixin, CB2ComplexDiagnostic):
         return self._paleo_data_root / directory / f"{self._dataset}.nc"
 
     def _check_required_dict_keys(self, dict_: dict[str, Any], dict_name: str) -> None:
-        missing = {self._period_key, "picontrol"} - set(dict_)
+        missing = {self._period_key, self.keys["control"]} - set(dict_)
         if missing:
             msg = (
                 f"Missing keys {sorted(missing)} for {dict_name} dictionary of "
@@ -600,7 +603,7 @@ class PaleoProxyScore(_ScoreRowMixin, CB2ComplexDiagnostic):
 
         data = complex_data_source.data
         annual = self._annual_field(data[self._period_key])
-        control = self._control_climatology(data["picontrol"])
+        control = self._control_climatology(data[self.keys["control"]])
         block_years = int(get_threshold("tier3.block_years"))
         spinup = int(get_threshold("tier3.spinup_years"))
         blocks = scoring.block_climatologies(annual, block_years, spinup=spinup)
