@@ -684,6 +684,19 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
     for key, path in experiment_paths.items():
         experiments[key] = load_experiment(key, path)
         print(f"Loaded experiment '{key}' from {path} (full record)", file=sys.stderr)
+    # `Protocol.member_keys`: further keys that read the submission's own
+    # output (the same record at another frequency). Unless the user pinned
+    # one to a different directory, it is the first member here and each
+    # member's own record in a per-member experiment suite.
+    member_keys = tuple(
+        key
+        for key in protocol.member_keys
+        if key not in experiment_paths
+        or experiment_paths[key].resolve() == Path(first_path).resolve()
+    )
+    for key in member_keys:
+        if key not in experiments:
+            experiments[key] = load_experiment(key, first_path)
     # Tier I's `historical` ends before the reserved test window
     # (`SuiteSpec.historical_pre_test`); a lazy time cut of the same cubes.
     # Which keys are cut is the protocol's (`Protocol.pre_test_keys`).
@@ -942,11 +955,13 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
                 # record under the submission key (`historical` for CB2), with
                 # its own variant in the data id; every other experiment is
                 # shared.
+                # So do the protocol's `member_keys` (resolved above).
+                own_keys = (submission_key, *member_keys)
                 runs = [
                     (
                         {
                             **experiments,
-                            submission_key: load_experiment(submission_key, path),
+                            **{key: load_experiment(key, path) for key in own_keys},
                         },
                         info_for(label),
                     )

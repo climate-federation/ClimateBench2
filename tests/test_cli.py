@@ -587,3 +587,41 @@ def test_leaderboard_regate_flag_reruns_the_gate_pass(
     regated.clear()
     main(["leaderboard", str(db_path), "--csv", str(tmp_path / "s.csv")])
     assert regated == []
+
+
+def test_member_keys_follow_each_member_in_a_per_member_experiment_suite(
+    recorded_score,  # noqa: ANN001
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """`Protocol.member_keys`: the member's own output under a second key."""
+    from dataclasses import replace
+
+    from climatebench2.protocol import CB2_PROTOCOL, use_protocol
+
+    model = tmp_path / "Model"
+    members = {}
+    for label in ("r1i1p1f1", "r2i1p1f1"):
+        (model / label).mkdir(parents=True)
+        (model / label / "x.nc").touch()
+        members[label] = model / label
+    argv = [
+        str(model),
+        "--suite",
+        "ClimateBench2_TierII_events",
+        "--no-score",
+        *[part for label, path in members.items() for part in ("--member", f"{label}={path}")],
+    ]
+
+    with use_protocol(replace(CB2_PROTOCOL, member_keys=("day",))):
+        _loads, runs = recorded_score(argv)
+    events = [run for run in runs if run["suite"] == "ClimateBench2_TierII_events"]
+    assert [run["variant"] for run in events] == list(members)
+    for run, path in zip(events, members.values()):
+        # Both keys hold THIS member's record, not the first member's.
+        assert str(path) in str(run["data"]["historical"])
+        assert str(path) in str(run["data"]["day"])
+
+    # Without member_keys (ClimateBench2 itself) there is no such key.
+    runs.clear()
+    _loads, runs = recorded_score(argv)
+    assert all("day" not in run["data"] for run in runs)

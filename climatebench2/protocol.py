@@ -190,6 +190,11 @@ class Protocol:
         The experiment key the submission's own members fill: the first member
         becomes ``experiments[submission_key]``, and a per-member experiment
         suite hands each member its own record under that key.
+    ``member_keys``
+        Further experiment keys that read **each member's own record** — the
+        same output at another frequency (e.g. a daily ``amip_day``). A
+        per-member experiment suite substitutes them per member, as it does
+        ``submission_key``, unless ``--experiment KEY=DIR`` pinned one.
     ``pre_test_keys``
         Experiment keys cut to end the year before the reserved test window for
         a suite with ``SuiteSpec.historical_pre_test``.
@@ -214,6 +219,7 @@ class Protocol:
     suite_registry: Mapping[str, SuiteSpec]
     default_suites: tuple[str, ...]
     submission_key: str = "historical"
+    member_keys: tuple[str, ...] = ()
     pre_test_keys: tuple[str, ...] = ("historical",)
     experiment_frequency: Mapping[str, str] = field(
         default_factory=_default_experiment_frequency,
