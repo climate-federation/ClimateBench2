@@ -283,21 +283,27 @@ def apply_gate(
 
 
 def _gate_attribute(attribute: str) -> dict[str, str]:
-    """Map every CB2 gate ``check_id`` to one attribute of its check.
+    """Map every gate ``check_id`` of the active protocol to one attribute.
 
-    Collected from the ``_gate_checks`` of every diagnostic exported by
-    :mod:`climatebench2.diags`, so the leaderboard knows the *full* set of
+    Collected from the ``_gate_checks`` of every diagnostic exported by each
+    of the protocol's ``diags_modules`` (:mod:`climatebench2.diags` for
+    ClimateBench2), so the leaderboard knows the *full* set of
     checks — including those whose gate did not run and therefore wrote no
     row, which is what makes an entry ticket read "incomplete" rather than
     silently passing.
     """
-    from climatebench2 import diags  # local: climatebench2.diags imports this module
+    # local imports: climatebench2.diags imports this module
+    from importlib import import_module
+
+    from climatebench2.protocol import get_protocol
 
     values: dict[str, str] = {}
-    for name in diags.__all__:
-        for check in getattr(getattr(diags, name), "_gate_checks", ()):
-            if isinstance(check, GateCheck):
-                values[check.check_id] = getattr(check, attribute)
+    for module_name in get_protocol().diags_modules:
+        module = import_module(module_name)
+        for name in module.__all__:
+            for check in getattr(getattr(module, name), "_gate_checks", ()):
+                if isinstance(check, GateCheck):
+                    values[check.check_id] = getattr(check, attribute)
     return values
 
 

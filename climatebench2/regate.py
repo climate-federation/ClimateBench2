@@ -106,7 +106,8 @@ class RegateReport:
 def schema_diagnostic_paths() -> dict[str, str]:
     """``suite entry name -> dotted diagnostic class path``.
 
-    Read from every ``climatebench2/suites/*.yml`` — the same source
+    Read from every ``*.yml`` of the active protocol's suites packages
+    (``climatebench2.suites`` for ClimateBench2) — the same source
     ``Suite._get_diagnostics`` builds its ``diag_name -> diag_cls`` map from
     (ClimateEval ``src/climateeval/suites/_base.py``). A ``name:`` reused
     across suites (e.g. ``reference_baseline``/``sst_baseline`` both naming
@@ -118,17 +119,22 @@ def schema_diagnostic_paths() -> dict[str, str]:
     """
     import yaml
 
+    from climatebench2.protocol import get_protocol
+
     mapping: dict[str, str] = {}
-    suites_dir = resources.files("climatebench2.suites")
-    for entry in suites_dir.iterdir():
-        if not entry.name.endswith((".yml", ".yaml")):
-            continue
-        definition = yaml.safe_load(entry.read_text(encoding="utf-8"))
-        for stanza in definition or ():
-            name = stanza.get("name")
-            diagnostic = stanza.get("diagnostic")
-            if name and diagnostic:
-                mapping[str(name)] = str(diagnostic)
+    # Every package of the active protocol's `suites_packages`; walked last to
+    # first so that, as in `_cli._resolve_suite`, an earlier package wins a name
+    # two of them define.
+    for package in reversed(get_protocol().suites_packages):
+        for entry in resources.files(package).iterdir():
+            if not entry.name.endswith((".yml", ".yaml")):
+                continue
+            definition = yaml.safe_load(entry.read_text(encoding="utf-8"))
+            for stanza in definition or ():
+                name = stanza.get("name")
+                diagnostic = stanza.get("diagnostic")
+                if name and diagnostic:
+                    mapping[str(name)] = str(diagnostic)
     return mapping
 
 

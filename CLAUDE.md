@@ -55,7 +55,9 @@ climatebench2/
 │                        #   ocean_heat_content.py (thetao -> layer OHC on load; upstream candidate),
 │                        #   frequency.py (Amon/pr + day/pr: each entry its frequency; upstream candidate)
 ├── leaderboard/         # .ddb results -> scores table -> static HTML page
-└── _cli.py              # `climatebench2 score` / `climatebench2 leaderboard`; SUITE_REGISTRY
+├── protocol.py          # Protocol plug-in: CB2_PROTOCOL, get_protocol/set_protocol/use_protocol; SuiteSpec,
+│                        #   SUITE_REGISTRY, DEFAULT_SUITES (re-exported by _cli)
+└── _cli.py              # `climatebench2 score` / `climatebench2 leaderboard`; main(argv, protocol=), build_parser(protocol)
 ```
 
 ## Key integration facts
@@ -71,7 +73,12 @@ climatebench2/
   *superset* of their required keys so one experiment dict feeds a whole suite.
   `Suite.get_database` passes the same data object to every diagnostic, so suites are
   split by data shape (cubes vs experiment dict).
-- `_cli.SuiteSpec` (in `SUITE_REGISTRY`) says, per suite, which data shape and window
+- **Protocol plug-in** (`protocol.py`): suites packages, gate modules (`diags_modules`), suite
+  registry, submission key (`historical`), pre-test keys, scorer tag, staged-root env var and the
+  thresholds layer stack come from the active `Protocol` (`get_protocol()`; default `CB2_PROTOCOL`).
+  A sibling benchmark calls `_cli.main(argv, protocol=MY_PROTOCOL)`; `build_parser(protocol)` exposes
+  `parser.cb2_subparsers` for extra subcommands. Never read the protocol at import time.
+- `protocol.SuiteSpec` (in `SUITE_REGISTRY`, re-exported by `_cli`) says, per suite, which data shape and window
   it gets and whether it runs **once per ensemble member** (`per_member`). The cube
   Tier II suites and `ClimateBench2_TierII_events` are per member; Tier I, the
   variability suite and Tier III are not. A per-member experiment suite gets each

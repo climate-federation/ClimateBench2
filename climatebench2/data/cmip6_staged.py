@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from loguru import logger
 
 from climatebench2._thresholds import get_threshold
+from climatebench2.protocol import get_protocol
 from climateeval.data import DataSourceGenerator, DataSourceInformation
 from climateeval.data._esmvaltool_intake import ESMValToolIntakeDataSource
 
@@ -172,13 +173,20 @@ def select_members(
     return [member for _realization, member in sorted(selected)[:cap]]
 
 
-def staged_root(data_root_dir: Path | str | None = None) -> Path | None:
+def staged_root(
+    data_root_dir: Path | str | None = None,
+    env: str | None = None,
+) -> Path | None:
     """The staged comparison-ensemble root, or ``None`` if there is none.
 
-    ``CLIMATEBENCH2_STAGED_CMIP6_ROOT`` wins over ``data_root_dir`` so a run
-    can point discovery at a subset of a larger root.
+    The environment variable ``env`` (default: the active protocol's
+    ``staged_root_env``, ``CLIMATEBENCH2_STAGED_CMIP6_ROOT`` for ClimateBench2)
+    wins over ``data_root_dir`` so a run can point discovery at a subset of a
+    larger root.
     """
-    from_env = os.environ.get(STAGED_ROOT_ENV, "").strip()
+    if env is None:
+        env = get_protocol().staged_root_env
+    from_env = os.environ.get(env, "").strip()
     root = Path(from_env) if from_env else None
     if root is None and data_root_dir is not None:
         root = Path(data_root_dir)

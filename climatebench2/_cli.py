@@ -74,144 +74,24 @@ from pathlib import Path
 from typing import Any
 
 from climatebench2 import windows
+from climatebench2.protocol import (
+    DEFAULT_SUITES,  # noqa: F401 - re-exported: moved to climatebench2.protocol
+    SUITE_REGISTRY,  # noqa: F401 - re-exported: moved to climatebench2.protocol
+    Protocol,
+    SuiteSpec,
+    get_protocol,
+    use_protocol,
+)
 
 # Heavy climateeval subsystems (ESMValCore/iris/dask, ~5 s to import) are
 # imported lazily inside the command functions, mirroring climateeval's CLI.
 
-DEFAULT_SUITES = [
-    "ClimateBench2_TierI",
-    "ClimateBench2_TierI_variability",
-    "ClimateBench2_TierII_events",
-    "ClimateBench2_TierII",
-]
 #: In-sample historical window: the default for cube suites that are not the
 #: post-2015 test window. It is also the window upstream's single-member
 #: `climateeval.data.CMIP6HistoricalR1I1P1F1` carries; the Tier II comparison
 #: ensemble is `climatebench2.data.StagedCMIP6HistoricalSSP245` and runs to the
 #: end of each member's SSP2-4.5 record instead.
 DEFAULT_TIMERANGE = "19790101/20141231"
-
-
-@dataclass(frozen=True)
-class SuiteSpec:
-    """How a CB2 suite is fed by ``climatebench2 score``.
-
-    ``shape``
-        ``"experiments"`` — an experiment dict (complex diagnostics), run once
-        per model; ``"cubes"`` — a CubeList (simple diagnostics).
-    ``source``
-        For cube suites: ``"model"`` (the submission, run once per ensemble
-        member) or ``"picontrol"`` (the piControl experiment, run once).
-    ``window``
-        For cube suites: ``"tier2"`` (the post-2015 test window),
-        ``"historical"`` (:data:`DEFAULT_TIMERANGE`) or ``"full"`` (no cut).
-        ``--timerange`` overrides the first two but never ``"full"``, which
-        is used where a window would destroy the statistic: a control run has
-        its own calendar (``TierI_variability``), and the daily suite's
-        extremes, PDFs and diurnal climatologies are defined by the paper
-        over the **whole historical record** and labelled in-sample.
-    ``per_member``
-        Whether the suite runs **once per submitted ensemble member**. True
-        for the cube suites (each member's series is its own data source, and
-        the scoring pass stacks them into one fair-CRPS ensemble) and for
-        ``ClimateBench2_TierII_events``, whose aggregated scalars — the
-        realized warming level, the Pinatubo anomaly, the hemispheric
-        asymmetry — are scored across the members exactly the same way. An
-        experiment-based suite that runs per member gets **that member's own
-        record** as its ``historical`` key. False for Tier I and Tier III: a
-        gate is a property of the model, not of one member.
-    ``reference_overlap``
-        Only for ``window == "full"``: whether a variable of this suite that
-        *has* a staged observational reference should be cut to that
-        reference's own record rather than left on the model's whole record
-        (:func:`climatebench2.reference_windows.resolve_full_record_timerange`).
-        True for the daily suite, whose in-sample statistics are climatologies
-        — an Rx1day climatology over a model's 1850–2100 and one over IMERG's
-        2001–2025 are different statistics, and an in-sample one must not
-        reach into the reserved window, so those entries are cut to the
-        reference's own pre-2015 record. The one entry scored as anomalies
-        (``pr_extremes_series``, ``tier2.anomaly_baseline``) is cut instead to
-        the baseline start through the reference's own last complete year —
-        2001–2024 for IMERG — because it needs the post-2015 steps too, but
-        it is still nowhere near the model's whole 1850–2100 record: reading
-        that full record for every comparison-ensemble member is what timed
-        out the 12 h daily job (2026-09-26). False for
-        ``ClimateBench2_TierI_variability``, whose ``full`` window means "this
-        is a piControl with its own calendar", where any clip is wrong.
-    ``historical_pre_test``
-        Only for a once-per-model experiment suite: its ``historical`` input
-        ends at :func:`climatebench2.windows.pre_test_last_year` (2014), the
-        year before the reserved test window. True for Tier I (ratified by
-        Duncan, 2026-11-02): a submission's ``historical`` is historical +
-        SSP2-4.5 spliced to 2100, and the I.8b ITCZ–EFE climatology, which
-        reads the whole record, would otherwise average in the scenario and
-        the held-out years. The per-member events suite keeps each member's
-        full record (the realized warming level *is* a test-window statistic).
-    """
-
-    shape: str
-    source: str = "model"
-    window: str = "historical"
-    per_member: bool = False
-    reference_overlap: bool = False
-    historical_pre_test: bool = False
-    note: str = ""
-
-
-#: Data shape and default window of every CB2 suite. Suites not listed (a
-#: ClimateEval suite, a user's YAML) are classified by probing their
-#: diagnostics and get the historical window.
-SUITE_REGISTRY: dict[str, SuiteSpec] = {
-    "ClimateBench2_TierI": SuiteSpec(
-        shape="experiments",
-        historical_pre_test=True,
-        note="Tier I gates: one experiment dict, historical up to 2014",
-    ),
-    "ClimateBench2_TierI_variability": SuiteSpec(
-        shape="cubes",
-        source="picontrol",
-        window="full",
-        note="ENSO amplitude/spectrum: >= 100 yr of piControl (paper I.5)",
-    ),
-    "ClimateBench2_TierII": SuiteSpec(
-        shape="cubes",
-        window="tier2",
-        per_member=True,
-        note="Tier II scoring over the reserved post-2015 test window",
-    ),
-    "ClimateBench2_TierII_daily": SuiteSpec(
-        shape="cubes",
-        window="full",
-        per_member=True,
-        reference_overlap=True,
-        note=(
-            "Tier II daily/hourly statistics over the FULL historical record "
-            "(the paper computes the extremes and the PDF/diurnal "
-            "climatologies over it, not over the test window) — every entry "
-            "is in-sample except `pr_extremes_series`, whose annual Rx1day/"
-            "Rx5day series is scored held-out over the test window. A variable "
-            "with a STAGED reference is cut to that reference's own record "
-            "instead: pre-2015 for the in-sample entries (IMERG: 2001–2014), "
-            "or the baseline start through the reference's own last complete "
-            "year for `pr_extremes_series` (IMERG: 2001–2024, since it also "
-            "scores the post-2015 steps) — so the model and the observations "
-            "give the same statistic, without reading the model's whole "
-            "1850–2100 record for every comparison-ensemble member"
-        ),
-    ),
-    "ClimateBench2_TierII_events": SuiteSpec(
-        shape="experiments",
-        per_member=True,
-        note=(
-            "Warming level / Pinatubo / hemispheric asymmetry: each member's "
-            "own historical record, in full"
-        ),
-    ),
-    "ClimateBench2_TierIII": SuiteSpec(
-        shape="experiments",
-        note="Paleo time slices vs piControl",
-    ),
-}
 
 
 def default_tier2_timerange(today: dt.date | None = None) -> str:
@@ -304,17 +184,19 @@ def end_at_year(cubes: Any, last_year: int) -> Any:  # noqa: ANN401
 
 
 def _resolve_suite(name: str) -> str:
-    """Resolve a suite name to a CB2-packaged YAML if one exists.
+    """Resolve a suite name to a protocol-packaged YAML if one exists.
 
-    CB2 suites shadow ClimateEval ones of the same name; anything else
-    (shipped ClimateEval suite names, explicit paths) passes through for
-    ClimateEval's own resolution.
+    The active protocol's ``suites_packages`` are searched in order (for
+    ClimateBench2, ``climatebench2.suites``); its suites shadow ClimateEval ones
+    of the same name. Anything else (shipped ClimateEval suite names, explicit
+    paths) passes through for ClimateEval's own resolution.
     """
     if Path(name).suffix in {".yml", ".yaml"}:
         return name
-    cb2_suite = resources.files("climatebench2.suites").joinpath(f"{name}.yml")
-    if cb2_suite.is_file():
-        return str(cb2_suite)
+    for package in get_protocol().suites_packages:
+        packaged = resources.files(package).joinpath(f"{name}.yml")
+        if packaged.is_file():
+            return str(packaged)
     return name
 
 
@@ -509,8 +391,9 @@ def _suite_spec(
     complex_type: type,
 ) -> SuiteSpec:
     """Registry entry for a suite, or one inferred from its diagnostics."""
-    if stem in SUITE_REGISTRY:
-        return SUITE_REGISTRY[stem]
+    registry = get_protocol().suite_registry
+    if stem in registry:
+        return registry[stem]
     shape = (
         "experiments"
         if any(isinstance(diag, complex_type) for diag in diagnostics.values())
@@ -704,7 +587,7 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
     members = _resolve_members(args)
 
     print("Loading ClimateEval (this can take a few seconds)…", file=sys.stderr)
-    from climatebench2.data import STAGED_ROOT_ENV, staged_root
+    from climatebench2.data import staged_root
     from climateeval._loader import load_cmor_dir
     from climateeval.data import DataSourceInformation
     from climateeval.diags.complex._base import ComplexDiagnostic
@@ -745,20 +628,27 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
             frequency.experiment_frequency(key),
         )
 
+    protocol = get_protocol()
+    submission_key = protocol.submission_key
     first_label, first_path = next(iter(members.items()))
     experiments: dict[str, Any] = {
-        "historical": load_experiment("historical", first_path),
+        submission_key: load_experiment(submission_key, first_path),
     }
-    explicit_historical = "historical" in experiment_paths
+    explicit_historical = submission_key in experiment_paths
     for key, path in experiment_paths.items():
         experiments[key] = load_experiment(key, path)
         print(f"Loaded experiment '{key}' from {path} (full record)", file=sys.stderr)
     # Tier I's `historical` ends before the reserved test window
     # (`SuiteSpec.historical_pre_test`); a lazy time cut of the same cubes.
+    # Which keys are cut is the protocol's (`Protocol.pre_test_keys`).
     pre_test_year = windows.pre_test_last_year()
     experiments_pre_test = {
         **experiments,
-        "historical": end_at_year(experiments["historical"], pre_test_year),
+        **{
+            key: end_at_year(experiments[key], pre_test_year)
+            for key in protocol.pre_test_keys
+            if key in experiments
+        },
     }
 
     def info_for(label: str) -> DataSourceInformation:
@@ -785,10 +675,11 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
     # be told where to look through the environment. Default it to --data-root;
     # an explicit $CLIMATEBENCH2_STAGED_CMIP6_ROOT (e.g. a small subset for a
     # smoke run) always wins.
-    if args.data_root is not None and not os.environ.get(STAGED_ROOT_ENV):
-        os.environ[STAGED_ROOT_ENV] = str(args.data_root)
+    staged_env = protocol.staged_root_env
+    if args.data_root is not None and not os.environ.get(staged_env):
+        os.environ[staged_env] = str(args.data_root)
 
-    out_dir = args.out or Path(f"{args.name}_climatebench2")
+    out_dir = args.out or Path(f"{args.name}_{protocol.name}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     not_applicable = [name.strip() for name in (args.not_applicable or [])]
@@ -866,7 +757,7 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
             file=sys.stderr,
         )
 
-    suite_names = args.suite or DEFAULT_SUITES
+    suite_names = args.suite or list(protocol.default_suites)
     db_paths: list[Path] = []
     declared_seen: set[str] = set()
     stripped_by_stem: dict[str, dict[str, list[str]]] = {}
@@ -992,13 +883,14 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
             if spec.per_member and not explicit_historical:
                 # Tier II aggregated scalars (§II.1) are scored across the
                 # submission's ensemble, so each member contributes its OWN
-                # historical record under the `historical` key, with its own
-                # variant in the data id; every other experiment is shared.
+                # record under the submission key (`historical` for CB2), with
+                # its own variant in the data id; every other experiment is
+                # shared.
                 runs = [
                     (
                         {
                             **experiments,
-                            "historical": load_experiment("historical", path),
+                            submission_key: load_experiment(submission_key, path),
                         },
                         info_for(label),
                     )
@@ -1008,13 +900,14 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
                 if spec.per_member and len(members) > 1:
                     print(
                         f"Note: suite '{stem}' runs per member, but "
-                        f"--experiment historical=DIR pins one record for "
+                        f"--experiment {submission_key}=DIR pins one record for "
                         f"every member; running it once instead",
                         file=sys.stderr,
                     )
                 if spec.historical_pre_test:
                     print(
-                        f"Suite '{stem}': `historical` ends in {pre_test_year}, "
+                        f"Suite '{stem}': `{'`, `'.join(protocol.pre_test_keys)}` "
+                        f"ends in {pre_test_year}, "
                         f"the year before the reserved test window",
                         file=sys.stderr,
                     )
@@ -1026,15 +919,24 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
                         info_for(first_label),
                     ),
                 ]
-        elif spec.source == "picontrol":
-            if "picontrol" in experiments:
-                runs = [(experiments["picontrol"], info_for(first_label))]
+        elif spec.source != "model":
+            # A cube suite fed by an auxiliary experiment (`SuiteSpec.source`
+            # names its key: piControl for ClimateBench2's variability suite).
+            if spec.source in experiments:
+                runs = [(experiments[spec.source], info_for(first_label))]
             else:
                 print(
-                    f"Warning: suite '{stem}' wants the piControl experiment "
-                    f"(the paper asks for >= 100 yr of control) but none was "
-                    f"given; falling back to the submission's own output — pass "
-                    f"--experiment picontrol=DIR for a protocol-conforming run",
+                    f"Warning: suite '{stem}' wants the "
+                    f"{'piControl' if spec.source == 'picontrol' else spec.source} "
+                    f"experiment "
+                    + (
+                        "(the paper asks for >= 100 yr of control) "
+                        if spec.source == "picontrol"
+                        else ""
+                    )
+                    + f"but none was given; falling back to the submission's own "
+                    f"output — pass --experiment {spec.source}=DIR for a "
+                    f"protocol-conforming run",
                     file=sys.stderr,
                 )
                 runs = [(load(first_path, None), info_for(first_label))]
@@ -1064,14 +966,14 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
             ]
 
         if spec.window == "tier2" and setup.mode == "live":
-            root = staged_root(args.data_root)
+            root = staged_root(args.data_root, env=staged_env)
             print(
                 "Note: the CMIP6 comparison ensemble of the Tier II suites is "
                 "climatebench2.data.StagedCMIP6HistoricalSSP245 — the "
                 "historical+SSP2-4.5 members staged under "
                 + (str(root) if root else "(no staged root found)")
                 + " (override with $"
-                + STAGED_ROOT_ENV
+                + staged_env
                 + "). It covers the post-2015 test window and carries "
                 "every member staged by the protocol's policy, so E_ref is "
                 "formed from several members per comparison model. Upstream's "
@@ -1160,7 +1062,7 @@ def _run_score(args: argparse.Namespace, setup: ComparisonSetup) -> None:  # noq
         run_scoring_pass(db_paths)
 
     print(
-        f"\nDone. Score with:  climatebench2 leaderboard "
+        f"\nDone. Score with:  {protocol.name} leaderboard "
         f"{' '.join(str(p) for p in db_paths)}",
         file=sys.stderr,
     )
@@ -1317,20 +1219,14 @@ def _cmd_leaderboard(args: argparse.Namespace) -> None:
         msg = "No ClimateBench2 scores found in the given database(s)."
         raise SystemExit(msg)
     html = render_html(scores, source_names=[p.name for p in db_paths])
-    output = args.output or Path("climatebench2_leaderboard.html")
+    output = args.output or Path(f"{get_protocol().name}_leaderboard.html")
     output.write_text(html, encoding="utf-8")
     print(f"Wrote {output}", file=sys.stderr)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the ``climatebench2`` argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="climatebench2",
-        description=(
-            "ClimateBench2: score and test climate models against the "
-            "ClimateBench v2 protocol, using ClimateEval for all diagnostics."
-        ),
-        epilog=(
+def _default_epilog(prog: str) -> str:
+    """ClimateBench2's help epilog, with ``prog`` as the command name."""
+    text = (
             "examples:\n"
             "  climatebench2 score /path/to/model/cmor/Amon --name MyModel\n"
             "      run the ClimateBench2 suites and write result databases\n"
@@ -1363,10 +1259,35 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "protocol spec: docs/metrics_reference.md\n"
             "architecture:  docs/climateeval_delineation_plan.md"
+    )
+    return text.replace("climatebench2 ", f"{prog} ").replace(
+        "MyModel_climatebench2",
+        f"MyModel_{prog}",
+    )
+
+
+def build_parser(protocol: Protocol | None = None) -> argparse.ArgumentParser:
+    """Build the command-line parser of ``protocol`` (default: the active one).
+
+    ``prog`` is ``protocol.name``. The subparsers action is exposed as
+    ``parser.cb2_subparsers`` so a protocol can add subcommands::
+
+        sub = parser.cb2_subparsers.add_parser("model-card", help="...")
+        sub.set_defaults(func=my_command)   # func(args: argparse.Namespace)
+    """
+    protocol = protocol or get_protocol()
+    parser = argparse.ArgumentParser(
+        prog=protocol.name,
+        description=protocol.description
+        or (
+            "ClimateBench2: score and test climate models against the "
+            "ClimateBench v2 protocol, using ClimateEval for all diagnostics."
         ),
+        epilog=protocol.epilog or _default_epilog(protocol.name),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command")
+    parser.cb2_subparsers = subparsers  # type: ignore[attr-defined]
 
     score = subparsers.add_parser(
         "score",
@@ -1413,7 +1334,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"Suite name or YAML path; repeat for several suites. CB2 suites "
             f"shadow ClimateEval ones of the same name "
-            f"(default: {', '.join(DEFAULT_SUITES)})."
+            f"(default: {', '.join(protocol.default_suites)})."
         ),
     )
     score.add_argument(
@@ -1515,7 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="DIR",
-        help="Output directory (default: <name>_climatebench2/).",
+        help=f"Output directory (default: <name>_{protocol.name}/).",
     )
     score.add_argument(
         "--no-score",
@@ -1705,7 +1626,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="FILE",
-        help="HTML output path (default: climatebench2_leaderboard.html).",
+        help=f"HTML output path (default: {protocol.name}_leaderboard.html).",
     )
     leaderboard.add_argument(
         "--csv",
@@ -1743,9 +1664,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Run the climatebench2 command-line interface."""
-    parser = build_parser()
+def main(argv: list[str] | None = None, *, protocol: Protocol | None = None) -> None:
+    """Run the command-line interface.
+
+    ``protocol`` activates another protocol for the call (suites, gate set,
+    submission key, thresholds layers); it is restored on return. Without it
+    the active protocol is used (ClimateBench2's, unless a caller set one).
+    Every function below that needs the protocol reads ``get_protocol()``.
+    """
+    if protocol is not None:
+        with use_protocol(protocol):
+            main(argv)
+        return
+    protocol = get_protocol()
+    parser = build_parser(protocol)
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help(sys.stderr)
