@@ -117,7 +117,26 @@ class ScoredOceanHeatContent(OceanHeatContentTimeSeries):
 
 
 class ScoredMonthlyMeanTimeSeries(MeanTimeSeries):
-    """Monthly-mean series scored by :mod:`climatebench2.scoring_pass`."""
+    """Monthly-mean series scored by :mod:`climatebench2.scoring_pass`.
+
+    The pass pairs a member with the reference on equal time stamps, and
+    sources do not agree on where in the month a monthly mean is stamped: the
+    16th at noon, the 15th at midnight, a day earlier on a 365-day calendar.
+    Left as they come, a model and a reference share few months or none, and
+    the score is taken over those few without a word. So every series is put
+    on one monthly time axis in the standard calendar, as the annual classes
+    already are.
+    """
+
+    def _preprocess(self, cube: Any, variable: Any) -> Any:
+        cube = super()._preprocess(cube, variable)
+        with setup_esmvaltool_config_and_logging():
+            return regrid_time(
+                cube,
+                frequency="mon",
+                calendar="standard",
+                units=COORDINATES["time"]["units"],
+            )
 
 
 class ScoredAnnualMaxTimeSeries(AnnualMeanTimeSeries):

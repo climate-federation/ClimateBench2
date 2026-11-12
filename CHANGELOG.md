@@ -60,6 +60,12 @@ default is the previous behaviour.
   variable also existed daily, and the gates reading monthly `pr` or `rlut` reported
   the variable missing.
 - **An open side of a range** (`range: [1.0, null]`) resolves to unbounded.
+- **`ScoredMonthlyMeanTimeSeries` puts every series on one monthly time axis.** The
+  scoring pass joins a member and the reference on the time stamp, and sources stamp
+  a monthly mean differently (the 16th at noon, the 15th at midnight, a day earlier
+  on a 365-day calendar). A CMIP6 model was scored against CERES-EBAF on 3 of 168
+  months and against HadCRUT5 and GPCP on none, without a message. ClimateBench2's
+  own suites score annual series, which were already on a standard axis.
 
 ## 2.0.1 (2026-11-02)
 

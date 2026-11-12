@@ -205,3 +205,53 @@ def test_internal_variability_skips_cleanly_for_the_ensemble_spread_source(caplo
         ValueError, match="must be 'picontrol' or 'ensemble_spread'",
     ):
         diag.get_output({}, info)
+
+
+def _monthly_cube(calendar: str, day_offset: float):
+    """Two years of a monthly global field whose stamps sit ``day_offset`` days into each month."""
+    import cf_units
+    import iris.coords
+    import iris.cube
+
+    unit = cf_units.Unit("days since 2001-01-01", calendar=calendar)
+    points = [
+        unit.date2num(__import__("cftime").datetime(2001 + m // 12, m % 12 + 1, 1, calendar=calendar)) + day_offset
+        for m in range(24)
+    ]
+    time = iris.coords.DimCoord(np.array(points, dtype=float), standard_name="time", units=unit)
+    lat = iris.coords.DimCoord(np.array([-45.0, 45.0]), standard_name="latitude", units="degrees")
+    lon = iris.coords.DimCoord(np.array([90.0, 270.0]), standard_name="longitude", units="degrees")
+    lat.guess_bounds()
+    lon.guess_bounds()
+    data = np.arange(24, dtype="f4")[:, None, None] * np.ones((1, 2, 2), dtype="f4")
+    return iris.cube.Cube(
+        data,
+        standard_name="air_temperature",
+        var_name="tas",
+        units="K",
+        dim_coords_and_dims=[(time, 0), (lat, 1), (lon, 2)],
+    )
+
+
+def test_monthly_series_share_one_time_axis_whatever_the_source_stamps() -> None:
+    """A model and a reference must meet on every month, not on the few whose stamps coincide.
+
+    The scoring pass joins on the time stamp. One source stamps a monthly mean
+    on the 16th at noon, another on the 15th at midnight, a 365-day-calendar
+    model a day earlier: left alone they share almost no step.
+    """
+    diag = ScoredMonthlyMeanTimeSeries.__new__(ScoredMonthlyMeanTimeSeries)
+    stamped = [
+        diag._preprocess(cube, None)  # noqa: SLF001
+        for cube in (
+            _monthly_cube("standard", 15.5),
+            _monthly_cube("standard", 14.0),
+            _monthly_cube("noleap", 14.5),
+        )
+    ]
+    axes = [cube.coord("time") for cube in stamped]
+    assert all(axis.units == axes[0].units for axis in axes)
+    assert all(np.array_equal(axis.points, axes[0].points) for axis in axes)
+    assert axes[0].shape == (24,)
+    # the values are untouched: month i of the series is i
+    assert np.allclose(stamped[2].data, np.arange(24))
