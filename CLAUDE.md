@@ -89,6 +89,11 @@ climatebench2/
   `BaselineContext`); `tier2.baselines` (optional, default `[climatology,
   pattern_scaling]`) lists which run. A package registers its own at import time. Every
   use of the scorer tag goes through `scoring_pass.scorer_tag()`.
+- Optional `tier2.e_ref.mode` (`ensemble_median` | `climatology`: `E_ref` = the Climatology
+  baseline's CRPS) and `tier2.e_ref.window` (`[first, last]`: `E_ref` and the CRPS in
+  `skill` over those years; adds `crps_ref_window`, `e_ref_window`; `e_ref_mode` only when
+  not the default). EOF/scalar tables keep their full-record value. None of this is in
+  `thresholds.yml` (the frozen-comparison fingerprint must not move).
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
   `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
   `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so

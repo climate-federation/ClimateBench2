@@ -213,3 +213,189 @@ def test_default_rows_are_unchanged_by_an_explicit_default_list() -> None:
         explicit = _rows(diagnostic=DIAGNOSTIC)
     pd.testing.assert_frame_equal(plain, explicit)
     assert "_steps" not in plain.columns
+
+
+# ---------------------------------------------------------------------------
+# CB-5: the E_ref window and the climatology mode
+# ---------------------------------------------------------------------------
+
+from climatebench2 import scoring  # noqa: E402
+from test_scoring_pass import synthetic_db  # noqa: E402, F401
+
+duckdb = pytest.importorskip("duckdb")
+
+#: No observational draws: per-step CRPS is then independent of the step count,
+#: so a windowed mean can be compared with an independently cut score.
+NO_DRAWS = {"tier2": {"obs_sigma": {"tas": 0.0}}}
+OPTIONAL = {"crps_ref_window", "e_ref_window", "e_ref_mode"}
+
+
+def _row(rows: pd.DataFrame, name: str, data_type: str) -> pd.Series:
+    return rows[(rows["data_id"] == name) & (rows["data_type"] == data_type)].iloc[0]
+
+
+def _model_steps(raw: pd.DataFrame, sources: pd.DataFrame, name: str, category: str):
+    """``(members, obs, years)`` of one model, as the pass stacks them."""
+    ids = sorted(
+        sources[(sources["name"] == name) & (sources["category"] == category)]["id"],
+    )
+    reference = raw[raw["data_type"] == "reference"].sort_values("time")
+    members = np.vstack(
+        [raw[raw["data_id"] == i].sort_values("time")["tas"].to_numpy() for i in ids],
+    )
+    return (
+        members,
+        reference["tas"].to_numpy(),
+        pd.to_datetime(reference["time"]).dt.year.to_numpy(),
+    )
+
+
+def test_the_e_ref_window_cuts_e_ref_and_the_crps_in_skill() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    with use_thresholds(NO_DRAWS):
+        full = pd.DataFrame(score_raw_output(raw, sources, settings=FAST))
+        with use_thresholds({"tier2": {"e_ref": {"window": [2015, 2024]}}}):
+            cut = pd.DataFrame(score_raw_output(raw, sources, settings=FAST))
+
+    def windowed(name: str, category: str) -> float:
+        members, obs, years = _model_steps(raw, sources, name, category)
+        crps_t = scoring.crps_fair(members, obs)
+        return float(crps_t[(years >= 2015) & (years <= 2024)].mean())
+
+    mine = _row(cut, "MyModel", "to_benchmark")
+    # `crps` stays the full-window value; the windowed one is its own column
+    assert mine["crps"] == _row(full, "MyModel", "to_benchmark")["crps"]
+    assert mine["crps_ref_window"] == pytest.approx(windowed("MyModel", "model"))
+    assert mine["e_ref_window"] == "2015-2024"
+    expected = float(
+        np.median([windowed("CMIP6_A", "CMIP6"), windowed("CMIP6_B", "CMIP6")]),
+    )
+    assert mine["e_ref"] == pytest.approx(expected)
+    assert mine["skill"] == pytest.approx(1.0 - mine["crps_ref_window"] / expected)
+    assert mine["e_ref"] != _row(full, "MyModel", "to_benchmark")["e_ref"]
+    # every comparison model and baseline is windowed too
+    other = _row(cut, "CMIP6_A", "other")
+    assert other["crps_ref_window"] == pytest.approx(windowed("CMIP6_A", "CMIP6"))
+    assert other["crps"] == _row(full, "CMIP6_A", "other")["crps"]
+    clim = _row(cut, CLIMATOLOGY_DATA_ID, "baseline")
+    assert clim["crps_ref_window"] != clim["crps"]
+    assert (cut.loc[cut["crps"].notna(), "e_ref_window"] == "2015-2024").all()
+    assert "e_ref_mode" not in cut.columns  # default mode: nothing written
+
+
+def test_a_window_without_steps_gives_no_skill() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    with use_thresholds({"tier2": {"e_ref": {"window": [2100, 2110]}}}):
+        rows = pd.DataFrame(score_raw_output(raw, sources, settings=FAST))
+    mine = _row(rows, "MyModel", "to_benchmark")
+    assert np.isnan(mine["crps_ref_window"])
+    assert np.isnan(mine["skill"])
+    assert np.isfinite(mine["crps"])
+
+
+def test_climatology_mode_normalises_by_the_climatology_baseline() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    with use_thresholds({"tier2": {"e_ref": {"mode": "climatology"}}}):
+        rows = pd.DataFrame(score_raw_output(raw, sources, settings=FAST))
+    clim = _row(rows, CLIMATOLOGY_DATA_ID, "baseline")
+    mine = _row(rows, "MyModel", "to_benchmark")
+    assert mine["e_ref"] == pytest.approx(clim["crps"])
+    assert mine["skill"] == pytest.approx(1.0 - mine["crps"] / clim["crps"])
+    assert mine["skill"] > 0  # it tracks the warming the climatology ignores
+    assert clim["skill"] == 0.0  # zero by construction
+    assert (rows.loc[rows["crps"].notna(), "n_ref_models"] == 0).all()
+    assert (rows.loc[rows["crps"].notna(), "e_ref_mode"] == "climatology").all()
+    assert "crps_ref_window" not in rows.columns  # no window set
+
+    # ... and no comparison model is needed
+    alone = raw[raw["data_type"] != "other"]
+    sources_alone = sources[sources["category"].isin(["observation", "model"])]
+    with use_thresholds({"tier2": {"e_ref": {"mode": "climatology"}}}):
+        rows = pd.DataFrame(score_raw_output(alone, sources_alone, settings=FAST))
+    assert _row(rows, "MyModel", "to_benchmark")["skill"] == pytest.approx(
+        mine["skill"],
+    )
+    with use_thresholds({"tier2": {"e_ref": {"mode": "bogus"}}}):
+        with pytest.raises(ValueError, match="mode"):
+            score_raw_output(raw, sources, settings=FAST)
+
+
+def test_climatology_mode_and_a_window_combine() -> None:
+    raw, sources = _tables(np.random.default_rng(5))
+    switches = {"tier2": {"e_ref": {"mode": "climatology", "window": [2015, 2021]}}}
+    with use_thresholds(NO_DRAWS, switches):
+        rows = pd.DataFrame(score_raw_output(raw, sources, settings=FAST))
+    clim = _row(rows, CLIMATOLOGY_DATA_ID, "baseline")
+    mine = _row(rows, "MyModel", "to_benchmark")
+    assert mine["e_ref"] == pytest.approx(clim["crps_ref_window"])
+    assert mine["skill"] == pytest.approx(1.0 - mine["crps_ref_window"] / mine["e_ref"])
+    assert mine["e_ref_window"] == "2015-2021"
+    assert clim["skill"] == 0.0
+
+
+def test_a_layout_without_a_time_axis_keeps_its_full_record_value() -> None:
+    switches = {"tier2": {"e_ref": {"window": [2015, 2021]}}}
+    raw, sources = _eof_tables(np.random.default_rng(31))
+    plain = pd.DataFrame(score_eof_output(raw, sources, settings=FAST))
+    with use_thresholds(switches):
+        eof = pd.DataFrame(score_eof_output(raw, sources, settings=FAST))
+    raw, sources = _scalar_tables(np.random.default_rng(51))
+    plain_scalar = pd.DataFrame(score_scalar_output(raw, sources))
+    with use_thresholds(switches):
+        scalar = pd.DataFrame(score_scalar_output(raw, sources))
+    for windowed, base in ((eof, plain), (scalar, plain_scalar)):
+        scored = windowed[windowed["crps"].notna()]
+        assert (scored["crps_ref_window"] == scored["crps"]).all()
+        assert (scored["e_ref_window"] == "full").all()
+        for column in ("e_ref", "skill", "crps"):
+            pd.testing.assert_series_equal(windowed[column], base[column])
+
+
+def test_the_default_writes_no_optional_column(synthetic_db) -> None:  # noqa: ANN001, F811
+    scoring_pass.score_database(synthetic_db, settings=FAST)
+    con = duckdb.connect(str(synthetic_db), read_only=True)
+    try:
+        columns = {
+            r[0]
+            for r in con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'metrics'",
+            ).fetchall()
+        }
+    finally:
+        con.close()
+    assert not columns & OPTIONAL
+    assert set(scoring_pass._SCORE_COLUMNS) <= columns  # noqa: SLF001
+
+
+def test_the_optional_columns_are_written_and_rescoring_is_idempotent(  # noqa: ANN201
+    synthetic_db,  # noqa: ANN001, F811
+):
+    switches = {"tier2": {"e_ref": {"mode": "climatology", "window": [2015, 2021]}}}
+
+    def read() -> pd.DataFrame:
+        con = duckdb.connect(str(synthetic_db), read_only=True)
+        try:
+            return con.execute(
+                f'SELECT * FROM "{DIAGNOSTIC}"."metrics" WHERE scorer = ?',
+                [scoring_pass.scorer_tag()],
+            ).df()
+        finally:
+            con.close()
+
+    with use_thresholds(switches):
+        scoring_pass.score_database(synthetic_db, settings=FAST)
+        first = read()
+        scoring_pass.score_database(synthetic_db, settings=FAST)
+        second = read()
+    assert OPTIONAL <= set(first.columns)
+    assert len(first) == len(second)
+    scored = first[first["crps"].notna()]
+    assert set(scored["e_ref_mode"]) == {"climatology"}
+    assert set(scored["e_ref_window"]) == {"2015-2021"}
+    # a later default run rewrites the rows; the columns stay but are NULL
+    scoring_pass.score_database(synthetic_db, settings=FAST)
+    third = read()
+    assert len(third) == len(first)
+    assert third["e_ref_mode"].isna().all()
+    assert third["crps_ref_window"].isna().all()
