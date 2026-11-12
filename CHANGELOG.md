@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+The protocol machinery is generalised so that a second protocol can run on it
+without forking, for example an AMIP-style comparison of atmosphere-only
+models. ClimateBench2's own behaviour is unchanged. No key is added to
+`thresholds.yml`, the protocol fingerprint of the
+frozen comparison bundle is the same, and the version stays 2.0.1, so existing
+bundles remain valid. Every new switch is an optional thresholds key whose
+default is the previous behaviour.
+
+### Protocol plug-in
+
+- **Layered thresholds.** `thresholds.yml` is the base of a stack of YAML layers,
+  deep-merged; a protocol overlays its own file (`_thresholds.set_threshold_layers`,
+  `use_thresholds`; `get_threshold(path, default)` for optional switches).
+- **Bounds are bound at run time.** Nothing reads a threshold at import or
+  class-definition time: `GateCheck` bounds are `Threshold` / `Band` references
+  resolved when the gate is evaluated (`pass_fail.resolved_checks`); a gate can be
+  repointed at another thresholds block (`_threshold_block`).
+- **Experiment keys.** Every complex gate reads its experiments through a class-level
+  `keys` mapping (role to data key), so a subclass changes experiments without
+  copying the computation.
+- **`climatebench2.protocol.Protocol`** bundles the suite registry, the suites and
+  gate packages, the submission key, further keys that read each member's own record
+  (`member_keys`), the experiment-to-frequency map and the scorer tag. The CLI
+  (`main(argv, protocol=...)`), `regate`, the gate set, the scoring pass and the
+  leaderboard read the active protocol.
+- **Automatic not-applicable.** A thresholds block may list `na_if_missing`
+  variables: a gate whose experiments lack one writes rows with `applicable = 0` and
+  a `na_reason`, not no row. `--not-applicable` also reaches gates in cube suites.
+- **Deploy runner.** `deploy/cb2_run.py` takes its CLI, scorer tag, comparison mode,
+  member-record keys and model card from the profile; the `v2` profile is unchanged.
+
+### Tier II scoring pass (all optional, default off)
+
+- **Pluggable baselines** (`register_baseline`, `tier2.baselines`).
+- **`E_ref` window and mode** (`tier2.e_ref.window`, `tier2.e_ref.mode`): the
+  reference error over the years the comparison ensemble covers, or the Climatology
+  baseline as an interim reference.
+- **Scored windows per entry** (`tier2.scored_window(s)`,
+  `tier2.anomaly_baseline.periods`).
+- **Per-step scores** (`tier2.persist_steps`): a `score_steps` table with
+  leave-one-member-out variants, and `scoring.paired_block_indices`, a seedable
+  block-bootstrap draw that does not depend on member count.
+- **Internal variability from the ensemble** (`tier2.internal_variability.source:
+  ensemble_spread`), for protocols without a control run.
+- **Single-member mean absolute error** (`tier2.single_member_mae`) in its own
+  column; a deterministic run still gets no CRPS.
+
+### Fixes
+
+- **III.1b mid-Holocene monsoon gate.** Its North-Africa box crosses the Greenwich
+  meridian and was passed to `extract_region` as 340..30, which iris refuses
+  ("minimum greater than maximum"): the gate could not run. It is now -20..30, and a
+  test computes the gate (none did).
+- **A monthly series labelled `monC` is monthly.** GFDL-CM4's Amon files carry the
+  CMIP6 label of a monthly climatology; `select_frequency` dropped them wherever the
+  variable also existed daily, and the gates reading monthly `pr` or `rlut` reported
+  the variable missing.
+- **An open side of a range** (`range: [1.0, null]`) resolves to unbounded.
+
 ## 2.0.1 (2026-11-02)
 
 Fixes found by the first end-to-end run of the cloud runner (MPI-ESM1-2-LR, ten
