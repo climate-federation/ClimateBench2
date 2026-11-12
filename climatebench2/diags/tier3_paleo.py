@@ -322,6 +322,11 @@ class MidHoloceneMonsoonGate(CB2ComplexDiagnostic):
         )
         self._harrison_dataset = harrison_dataset
 
+    @property
+    def _region(self) -> dict[str, Any]:
+        """The North-Africa box, read when used (never at import)."""
+        return self._threshold("tier3.midholocene_monsoon.region")
+
     def _region_mean(
         self,
         data: CubeList | Dataset,
@@ -330,13 +335,20 @@ class MidHoloceneMonsoonGate(CB2ComplexDiagnostic):
         """Precipitation climatology over North Africa (kg m-2 s-1)."""
         cube = self._cube(data, _mon("pr"))
         with setup_esmvaltool_config_and_logging():
-            # extract_region handles the 20W..30E wrap (start > end)
+            # A box across the Greenwich meridian (20W..30E) is given to
+            # extract_region as -20..30: iris wraps a range with start < end,
+            # and refuses 340..30 ("minimum greater than maximum").
+            region = self._region
+            lon_start = float(region["lon"][0]) % 360.0
+            lon_end = float(region["lon"][1]) % 360.0
+            if lon_start > lon_end:
+                lon_start -= 360.0
             cube = extract_region(
                 cube,
-                start_longitude=float(self._region["lon"][0]) % 360.0,
-                end_longitude=float(self._region["lon"][1]),
-                start_latitude=float(self._region["lat"][0]),
-                end_latitude=float(self._region["lat"][1]),
+                start_longitude=lon_start,
+                end_longitude=lon_end,
+                start_latitude=float(region["lat"][0]),
+                end_latitude=float(region["lat"][1]),
             )
             clim = climate_statistics(cube, "mean", "month")
         month_numbers = clim.coord("month_number").points.astype(int)

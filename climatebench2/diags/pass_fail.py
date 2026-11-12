@@ -165,8 +165,12 @@ class Threshold:
     path: str
     index: int | None = None
 
-    def resolve(self, block: str | None = None) -> float:
-        """The concrete number, under the active threshold layers."""
+    def resolve(self, block: str | None = None) -> float | None:
+        """The concrete number, under the active threshold layers.
+
+        ``None`` for a ``null`` threshold — an open side of a range, as in
+        ``range: [1.0, null]`` — which a :class:`GateCheck` reads as unbounded.
+        """
         path = self.path
         if path.startswith("."):
             if block is None:
@@ -176,7 +180,7 @@ class Threshold:
         value = get_threshold(path)
         if self.index is not None:
             value = value[self.index]
-        return float(value)
+        return None if value is None else float(value)
 
 
 @dataclass(frozen=True)

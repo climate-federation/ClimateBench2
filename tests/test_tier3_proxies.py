@@ -419,3 +419,54 @@ def test_a_gates_own_block_overrides_the_global_spinup(tmp_path) -> None:  # noq
     # block_years is read the same way
     with use_thresholds({"fixed_sst": {"tier3": {"spinup_years": 0, "block_years": 50}}}):
         assert run(FixedSSTProxyScore, 150)["n_members"] == 3
+
+
+# ---------------------------------------------------------------------------
+# III.1b mid-Holocene monsoon gate, computed (not only wired)
+# ---------------------------------------------------------------------------
+
+
+def test_midholocene_monsoon_gate_computes_the_north_africa_anomaly() -> None:
+    """The gate runs: its box crosses the Greenwich meridian (20W..30E)."""
+    from types import SimpleNamespace
+
+    from climatebench2.diags.tier3_paleo import MidHoloceneMonsoonGate
+
+    lat = np.linspace(-85.0, 85.0, N_LAT)
+    lon = np.linspace(5.0, 355.0, N_LON)
+    # The box (10-30N, 20W-30E) and the cells bordering it are 0.8 mm/day
+    # wetter (on this 10-degree grid the extraction also takes cells whose
+    # bounds touch the box); everything well away from it is much drier, so a
+    # box taken on the wrong side of the meridian gives a negative number.
+    near_box = ((lat >= 0.0) & (lat <= 40.0))[:, None] & ((lon >= 320.0) | (lon <= 50.0))[None, :]
+    per_day = 1.0 / 86400.0  # kg m-2 s-1 per mm/day
+    control = np.full((N_LAT, N_LON), 6.0 * per_day)
+    wetter = control + np.where(near_box, 0.8 * per_day, -5.0 * per_day)
+    data = {
+        "midholocene": CubeList([_cube("pr", "kg m-2 s-1", n_years=4, field=wetter)]),
+        "picontrol": CubeList([_cube("pr", "kg m-2 s-1", n_years=4, field=control)]),
+    }
+    gate = MidHoloceneMonsoonGate("midholocene_monsoon", harrison_dataset=None)
+    output = gate._calculate_raw_output(SimpleNamespace(data=data))  # noqa: SLF001
+    values = {variable.var_name: float(cube.data) for variable, cube in output.items()}
+    assert values["jjas_pr_anom_mmday"] == pytest.approx(0.8, rel=1e-4)
+    assert values["annual_pr_anom_mmday"] == pytest.approx(0.8, rel=1e-4)
+
+
+def test_an_open_side_of_a_range_is_unbounded() -> None:
+    """`range: [1.0, null]` resolves to a lower bound and no upper bound."""
+    from climatebench2._thresholds import use_thresholds
+    from climatebench2.diags.pass_fail import GateCheck, Threshold
+
+    check = GateCheck(
+        "toy",
+        "x",
+        lower=Threshold(".range", 0),
+        upper=Threshold(".range", 1),
+        block="toy.gate",
+    )
+    overlay = {"toy": {"gate": {"range": [1.0, None], "requirement": "required", "tier": "I"}}}
+    with use_thresholds(overlay):
+        resolved = check.resolve()
+    assert resolved.lower == 1.0
+    assert resolved.upper is None
