@@ -128,10 +128,24 @@ SCORER = "climatebench2"
 def scorer_tag() -> str:
     """The ``scorer`` tag of every row this pass writes (and later deletes).
 
-    The one place the pass learns its own name. ClimateBench2 returns
-    :data:`SCORER`; a protocol built on this pass overrides it here.
+    The one place the pass learns its own name: the active protocol's
+    ``scorer`` (:data:`SCORER` for ClimateBench2). Read per call, never at
+    import, because the protocol is set by the CLI after import.
     """
-    return SCORER
+    from climatebench2.protocol import get_protocol
+
+    return get_protocol().scorer
+
+
+def tier3_scorer_tag() -> str:
+    """The ``scorer`` tag of the rows the Tier III paleo diagnostics write.
+
+    The active protocol's ``tier3_scorer`` (:data:`TIER3_SCORER` for
+    ClimateBench2).
+    """
+    from climatebench2.protocol import get_protocol
+
+    return get_protocol().tier3_scorer
 
 
 #: ``scorer`` tag of the score rows the **Tier III paleo diagnostics** write
@@ -339,11 +353,13 @@ _STEPS_KEY = "_steps"
 #: their DuckDB types. A default (ClimateBench2) run never writes them, so its
 #: ``metrics`` table keeps exactly the columns it always had.
 #: ``crps_ref_window`` / ``e_ref_window`` — ``tier2.e_ref.window`` is set;
-#: ``e_ref_mode`` — ``tier2.e_ref.mode`` is not the default.
+#: ``e_ref_mode`` — ``tier2.e_ref.mode`` is not the default; ``mae`` —
+#: ``tier2.single_member_mae`` is on and a single-member source was met.
 _OPTIONAL_SCORE_COLUMNS: dict[str, str] = {
     "crps_ref_window": "DOUBLE",
     "e_ref_window": "VARCHAR",
     "e_ref_mode": "VARCHAR",
+    "mae": "DOUBLE",
 }
 
 #: ``tier2.e_ref.mode`` values.
@@ -1179,27 +1195,17 @@ def internal_variability_source() -> str:
 
 
 def _ensemble_spread_sigma(members: np.ndarray, statistic: str) -> float:
-    """Between-member σ (ddof=1) of a statistic of an ensemble.
+    """Between-member σ (ddof=1) of a statistic of an ensemble, or 0.0.
 
-    ``members`` is ``(n_members, n_time)``; ``statistic`` is ``"mean"`` (the
-    window mean) or ``"trend"`` (OLS slope per step), evaluated per member.
-    Fewer than three members with a finite statistic give 0.0 — "no σ_int
-    available", exactly as when the piControl table has no entry — because a
-    standard deviation from two values has one degree of freedom.
+    :func:`climatebench2.scoring.ensemble_spread_sigma`, with its NaN (fewer
+    than three members with a finite statistic) read as 0.0 — "no σ_int
+    available", exactly as when the piControl table has no entry.
     """
-    ensemble = np.atleast_2d(np.asarray(members, dtype=float))
-    if statistic == "mean":
-        with np.errstate(all="ignore"):
-            values = np.array([np.nanmean(row) if np.isfinite(row).any() else np.nan for row in ensemble])
-    elif statistic == "trend":
-        values = np.array([scoring.ols_trend(row) for row in ensemble], dtype=float)
-    else:
-        msg = f"Unknown statistic '{statistic}' (expected 'mean' or 'trend')"
-        raise ValueError(msg)
-    values = values[np.isfinite(values)]
-    if values.size < _MIN_MEMBERS_FOR_SPREAD:
-        return 0.0
-    return float(values.std(ddof=1))
+    sigma = scoring.ensemble_spread_sigma(
+        np.atleast_2d(np.asarray(members, dtype=float)),
+        statistic,
+    )
+    return float(sigma) if np.isfinite(sigma) else 0.0
 
 
 def sigma_internal_for(
@@ -2368,6 +2374,15 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
                 scored[key] = _empty_row(name, data_type, column, "single member")
                 scored[key]["n_members"] = float(members.shape[0])
                 scored[key]["n_time"] = float(obs.size)
+                if members.shape[0] == 1 and get_threshold(
+                    "tier2.single_member_mae",
+                    False,  # noqa: FBT003 - optional protocol switch
+                ):
+                    # A deterministic run has no fair CRPS (paper §5.3) and
+                    # gets none: `crps` stays NaN. The mean absolute error
+                    # is reported in its own column, for development use.
+                    with np.errstate(invalid="ignore"):
+                        scored[key]["mae"] = float(np.nanmean(np.abs(members[0] - obs)))
             else:
                 scored[key] = _score_row(
                     data_id=name,

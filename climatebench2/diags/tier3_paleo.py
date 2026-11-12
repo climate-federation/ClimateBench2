@@ -73,7 +73,7 @@ from climatebench2.diags.tier1_physics import (
     _mon,
 )
 from climatebench2.scoring_pass import (
-    TIER3_SCORER,
+    tier3_scorer_tag,
     WINDOW_HELD_OUT,
     empty_score_row,
 )
@@ -249,7 +249,7 @@ class _ScoreRowMixin:
 
     def _row(self, var_id: str, reason: str = "", **fields: Any) -> dict[str, Any]:
         """Queue one score row (``data_id`` filled in by :meth:`get_output`)."""
-        row = empty_score_row("", "to_benchmark", var_id, reason, scorer=TIER3_SCORER)
+        row = empty_score_row("", "to_benchmark", var_id, reason, scorer=tier3_scorer_tag())
         row.update(window=WINDOW_HELD_OUT, **fields)
         self._pending_rows.append(row)
         return row

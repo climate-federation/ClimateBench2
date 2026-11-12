@@ -932,3 +932,45 @@ def test_the_picontrol_rows_are_not_collected_in_ensemble_spread_mode(
         pytest.raises(ValueError, match="source"),
     ):
         scoring_pass.internal_variability_source()
+
+
+# ---------------------------------------------------------------------------
+# single-member mean absolute error (development use)
+# ---------------------------------------------------------------------------
+
+
+def test_single_member_mae_is_optional_and_never_a_crps() -> None:
+    """A deterministic run never gets a CRPS; the MAE column is opt-in."""
+    import numpy as np
+    import pandas as pd
+
+    from climatebench2 import scoring_pass
+    from climatebench2._thresholds import use_thresholds
+
+    times = pd.date_range("2015-01-01", periods=8, freq="YS")
+    truth = np.linspace(0.0, 0.7, 8)
+    rows = []
+    for data_id, data_type, values in (
+        ("obs", "reference", truth),
+        ("solo", "to_benchmark", truth + 0.25),
+    ):
+        rows.append(
+            pd.DataFrame(
+                {"time": times, "tas": values, "data_id": data_id, "data_type": data_type},
+            ),
+        )
+    raw = pd.concat(rows, ignore_index=True)
+
+    def solo_row() -> dict:
+        rows = scoring_pass.score_raw_output(raw, None)
+        return next(row for row in rows if row["data_id"] == "solo")
+
+    default = solo_row()
+    assert default["reason"] == "single member"
+    assert np.isnan(default["crps"])
+    assert "mae" not in default
+
+    with use_thresholds({"tier2": {"single_member_mae": True}}):
+        switched = solo_row()
+    assert np.isnan(switched["crps"])
+    assert switched["mae"] == pytest.approx(0.25)
