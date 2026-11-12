@@ -152,10 +152,7 @@ def test_without_the_key_nothing_changes() -> None:
 def test_block_is_read_from_the_checks_when_the_class_names_none() -> None:
     class Blocked(NaGate):
         _threshold_block = None
-        _gate_checks = tuple(
-            type("C", (GateCheck,), {"block": "toy.na"})("toy_c", "toy_x")  # noqa: PLW0108
-            for _ in range(1)
-        )
+        _gate_checks = (GateCheck("toy_c", "toy_x", block="toy.na"),)
 
     with use_thresholds(NA_BLOCK):
         out = _gate(Blocked).get_output({"amip": _cubes("pr", "hfls")}, INFO)
