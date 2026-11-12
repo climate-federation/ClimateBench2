@@ -110,6 +110,32 @@ climatebench2/
   (§II.1). A simple diagnostic writes the third shape through `ScalarTableDiagnostic`
   (`diags/tier2_daily.py`). A skill score that is not an error (the Perkins PDF
   overlap) is written as a metric and never enters `E_ref`.
+- The Tier II pass's baselines come from a registry
+  (`scoring_pass.register_baseline(name, fn, data_id=..., layouts=...)`, `BASELINES`,
+  `BaselineContext`); `tier2.baselines` (optional, default `[climatology,
+  pattern_scaling]`) lists which run. A package registers its own at import time. Every
+  use of the scorer tag goes through `scoring_pass.scorer_tag()`.
+- Optional `tier2.e_ref.mode` (`ensemble_median` | `climatology`: `E_ref` = the Climatology
+  baseline's CRPS) and `tier2.e_ref.window` (`[first, last]`: `E_ref` and the CRPS in
+  `skill` over those years; adds `crps_ref_window`, `e_ref_window`; `e_ref_mode` only when
+  not the default). EOF/scalar tables keep their full-record value. None of this is in
+  `thresholds.yml` (the frozen-comparison fingerprint must not move).
+- Optional `tier2.scored_window` (`[first, last]`, default: `test_window_start` → last
+  complete year; `windows.test_window_years` follows it), `tier2.scored_windows:
+  {<entry>: [first, last]}` and `tier2.anomaly_baseline.periods: {<entry>: [first, last]}`
+  (`windows.scored_window(entry)`, `windows.anomaly_baseline_years(entry)`): the pass
+  anomalises about the entry's own period and scores its own window. The CLI/reference
+  load windows do not read the per-entry keys yet.
+- Optional `tier2.persist_steps` (default false) makes the pass write a `score_steps`
+  table beside `metrics` (per model/baseline, variable and step: fair CRPS; `left_out`
+  rows for models with >= 3 members). The pass deletes and rewrites its own rows;
+  `frozen_comparison` ignores the table (its `_TABLES` is a fixed list).
+  `scoring.paired_block_indices(n_steps, block_length, n_boot, seed)` gives seed-only
+  moving-block draws to pair resamples across entries.
+- Optional `tier2.internal_variability.source` (`picontrol` default | `ensemble_spread`):
+  with `ensemble_spread` σ_int of the consistency test is the between-member std of the
+  scored statistic; it is *reported* in `sigma_internal` but not added to σ_total again
+  (the `var(members)` term is that spread), so σ_total² = var(members) + σ_obs².
 - Every scored row carries a `window` label (`held-out` / `in-sample` /
   `perfect-model`) from `tier2.window_labels` and a `variable_status` (`core` /
   `extended`, paper Table 2) from `tier2.variable_status` — presentation only, so

@@ -107,7 +107,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -120,7 +120,19 @@ if TYPE_CHECKING:
 
 #: Value of the ``scorer`` column on every row this pass writes. Rows with
 #: this tag are deleted before a re-run, which makes the pass idempotent.
+#: Read it through :func:`scorer_tag`, never directly, so a protocol that
+#: names its own scorer changes one function.
 SCORER = "climatebench2"
+
+
+def scorer_tag() -> str:
+    """The ``scorer`` tag of every row this pass writes (and later deletes).
+
+    The one place the pass learns its own name. ClimateBench2 returns
+    :data:`SCORER`; a protocol built on this pass overrides it here.
+    """
+    return SCORER
+
 
 #: ``scorer`` tag of the score rows the **Tier III paleo diagnostics** write
 #: for themselves (:mod:`climatebench2.diags.tier3_paleo`). Their pseudo-
@@ -241,6 +253,9 @@ _MIN_OVERLAP = 3
 #: Minimum members for a fair CRPS.
 _MIN_MEMBERS = 2
 
+#: Minimum members for an ensemble-spread σ_int (and for leave-one-out rows).
+_MIN_MEMBERS_FOR_SPREAD = 3
+
 #: Median monthly-step length used to tell a monthly series from an annual one.
 _MONTHLY_MAX_DAYS = 200
 
@@ -314,6 +329,77 @@ _SCORE_COLUMNS: dict[str, str] = {
 _TEXT_COLUMNS = frozenset(
     key for key, dtype in _SCORE_COLUMNS.items() if dtype == "VARCHAR"
 )
+
+
+#: Private key a scored row carries its :class:`_StepData` under until the
+#: pass has used it (:func:`_drain_steps`); it never reaches a returned row.
+_STEPS_KEY = "_steps"
+
+#: Columns the pass adds **only when a switch makes them meaningful**, with
+#: their DuckDB types. A default (ClimateBench2) run never writes them, so its
+#: ``metrics`` table keeps exactly the columns it always had.
+#: ``crps_ref_window`` / ``e_ref_window`` — ``tier2.e_ref.window`` is set;
+#: ``e_ref_mode`` — ``tier2.e_ref.mode`` is not the default.
+_OPTIONAL_SCORE_COLUMNS: dict[str, str] = {
+    "crps_ref_window": "DOUBLE",
+    "e_ref_window": "VARCHAR",
+    "e_ref_mode": "VARCHAR",
+}
+
+#: ``tier2.e_ref.mode`` values.
+E_REF_ENSEMBLE_MEDIAN = "ensemble_median"
+E_REF_CLIMATOLOGY = "climatology"
+_E_REF_MODES = (E_REF_ENSEMBLE_MEDIAN, E_REF_CLIMATOLOGY)
+
+#: ``step_kind`` of a scored axis: a time series, EOF modes, one scalar.
+STEP_KIND_TIME = "time"
+STEP_KIND_MODE = "mode"
+STEP_KIND_SCALAR = "scalar"
+
+
+@dataclass(frozen=True, eq=False)
+class _StepData:
+    """The per-step fair CRPS behind one score row, carried on the row.
+
+    ``kind``
+        ``time`` / ``mode`` / ``scalar`` (``STEP_KIND_*``).
+    ``steps``
+        One label per step: the ISO date, the mode number or ``"0"``.
+    ``years``
+        ``time`` only: each step's calendar year (the ``E_ref`` window cuts
+        on it); empty otherwise.
+    ``crps``
+        The per-step fair CRPS (the series whose mean is the row's ``crps``).
+    ``members`` / ``member_labels``
+        The ensemble the row scored, ``(n_members, n_steps)``, and one label
+        per member (``None`` for a baseline's pseudo-members, which are not
+        members of anything).
+    ``crps_fn``
+        ``members -> per-step CRPS`` with this row's observations and
+        observational draws, to re-score the ensemble without one member.
+    """
+
+    kind: str
+    steps: list[str]
+    years: np.ndarray
+    crps: np.ndarray
+    members: np.ndarray
+    member_labels: list[str] | None
+    crps_fn: Callable[[np.ndarray], np.ndarray]
+
+    def window_mean(self, window: tuple[int, int]) -> float:
+        """Mean CRPS over the steps whose year is in ``window`` (NaN if none)."""
+        if self.kind != STEP_KIND_TIME:
+            return float(np.nanmean(self.crps)) if np.isfinite(self.crps).any() else np.nan
+        in_window = (
+            (self.years >= window[0]) & (self.years <= window[1]) & np.isfinite(self.crps)
+        )
+        return float(self.crps[in_window].mean()) if in_window.any() else float("nan")
+
+
+def _iso_dates(times: pd.Series | pd.DatetimeIndex) -> list[str]:
+    """ISO ``YYYY-MM-DD`` strings of a time axis."""
+    return [stamp.date().isoformat() for stamp in pd.to_datetime(pd.Series(times))]
 
 
 @dataclass
@@ -537,7 +623,13 @@ class AnomalyContext:
         The table with every scorable value replaced by its anomaly about
         that ``data_id``'s **own** baseline-window climatology, and cut to
         the steps the protocol actually scores (``tier2.test_window_start``
-        onwards) — so ``n_time`` counts post-2015 steps and nothing else.
+        onwards, or the entry's own ``tier2.scored_window(s)``) — so
+        ``n_time`` counts scored steps and nothing else.
+    ``period`` / ``window``
+        The baseline period the anomalies are about and the scored window
+        the table was cut to (``windows.anomaly_baseline_years`` /
+        ``windows.scored_window`` of the entry; ``window[1]`` is ``None`` for
+        the open-ended default).
     ``baseline``
         The ``reference_baseline`` frames, shifted by the *same* offsets, so
         the Climatology baseline's pseudo-members live in the same anomaly
@@ -556,6 +648,8 @@ class AnomalyContext:
     baseline: dict[tuple[str, str], pd.DataFrame] | None
     missing: set[tuple[str, str]] = field(default_factory=set)
     reference_missing: set[str] = field(default_factory=set)
+    period: tuple[int, int] = (0, 0)
+    window: tuple[int, int | None] = (0, None)
 
 
 def baseline_climatology(
@@ -564,6 +658,7 @@ def baseline_climatology(
     *,
     monthly: bool,
     min_years: int | None = None,
+    period: tuple[int, int] | None = None,
 ) -> dict[int, float] | None:
     """One source's climatology over ``tier2.climatology_baseline_period``.
 
@@ -571,11 +666,12 @@ def baseline_climatology(
     for an annual one, or ``None`` when the record covers fewer than
     ``tier2.anomaly_baseline.min_years`` distinct years of the window — in
     which case the protocol does **not** score the source at all rather than
-    anomalise it about a climatology it does not have.
+    anomalise it about a climatology it does not have. ``period`` overrides
+    the protocol window (a suite entry with its own baseline).
     """
     if min_years is None:
         min_years = windows.anomaly_min_baseline_years()
-    first, last = windows.baseline_window_years()
+    first, last = period or windows.baseline_window_years()
     stamps = pd.to_datetime(pd.Series(times)).reset_index(drop=True)
     years = stamps.dt.year.to_numpy()
     in_window = (years >= first) & (years <= last) & np.isfinite(values)
@@ -617,6 +713,8 @@ def anomalise_raw_output(
     raw_df: pd.DataFrame,
     baseline: dict[tuple[str, str], pd.DataFrame] | None,
     var_columns: list[str],
+    *,
+    diagnostic: str = "",
 ) -> AnomalyContext:
     """Reduce a scored time-series table to anomalies, then cut to the window.
 
@@ -635,13 +733,23 @@ def anomalise_raw_output(
     shifted by the same offsets so the Climatology baseline stays in the
     same space.
 
-    Only then is the table cut to ``tier2.test_window_start`` onwards: the
-    baseline years define the anomaly, they are never scored.
+    Only then is the table cut to the scored window (``tier2.test_window_start``
+    onwards by default): the baseline years define the anomaly, they are never
+    scored. ``diagnostic`` (the suite entry name) selects an entry's own
+    ``tier2.scored_windows`` and ``tier2.anomaly_baseline.periods``; without
+    an override both are the protocol's.
     """
     frame = raw_df.reset_index(drop=True).copy()
     min_years = windows.anomaly_min_baseline_years()
-    first, last = windows.baseline_window_years()
-    context = AnomalyContext(raw=frame, baseline=dict(baseline or {}))
+    period = windows.anomaly_baseline_years(diagnostic)
+    first, last = period
+    window = windows.scored_window(diagnostic)
+    context = AnomalyContext(
+        raw=frame,
+        baseline=dict(baseline or {}),
+        period=period,
+        window=window,
+    )
     reference_ids = {
         str(i) for i in frame.loc[frame["data_type"] == "reference", "data_id"]
     }
@@ -672,6 +780,7 @@ def anomalise_raw_output(
                 values,
                 monthly=monthly,
                 min_years=min_years,
+                period=period,
             )
             own_window = offsets is not None
             if offsets is None and data_id in reference_ids:
@@ -680,6 +789,7 @@ def anomalise_raw_output(
                     column,
                     monthly=monthly,
                     min_years=min_years,
+                    period=period,
                 )
             if offsets is None:
                 context.missing.add((data_id, column))
@@ -719,8 +829,7 @@ def anomalise_raw_output(
                 years=(first, last),
             )
 
-    start = int(get_threshold("tier2.test_window_start"))
-    scored = pd.to_datetime(frame["time"]).dt.year >= start
+    scored = windows.in_scored_window(pd.to_datetime(frame["time"]).dt.year, window)
     context.raw = frame[scored].reset_index(drop=True)
     return context
 
@@ -731,6 +840,7 @@ def _recorded_climatology(
     *,
     monthly: bool,
     min_years: int,
+    period: tuple[int, int] | None = None,
 ) -> dict[int, float] | None:
     """The reference's climatology from its ``reference_baseline`` rows."""
     recorded = _baseline_window_series(baseline, column, monthly=monthly)
@@ -741,6 +851,7 @@ def _recorded_climatology(
         recorded[column].to_numpy(float),
         monthly=monthly,
         min_years=min_years,
+        period=period,
     )
 
 
@@ -1041,6 +1152,56 @@ def _first_finite(series: pd.Series) -> float:
     return float(values.iloc[0]) if not values.empty else float("nan")
 
 
+#: ``tier2.internal_variability.source`` values.
+SIGMA_INT_PICONTROL = "picontrol"
+SIGMA_INT_ENSEMBLE_SPREAD = "ensemble_spread"
+
+
+def internal_variability_source() -> str:
+    """Where σ_int of the consistency test comes from.
+
+    ``tier2.internal_variability.source`` (optional): ``picontrol`` (default)
+    reads the piControl-derived ``InternalVariability`` rows;
+    ``ensemble_spread`` takes the between-member spread of the scored ensemble
+    itself (:func:`_ensemble_spread_sigma`), for a protocol with no control
+    run (AMIP). Read when the pass runs.
+    """
+    source = str(
+        get_threshold("tier2.internal_variability.source", SIGMA_INT_PICONTROL),
+    )
+    if source not in (SIGMA_INT_PICONTROL, SIGMA_INT_ENSEMBLE_SPREAD):
+        msg = (
+            "tier2.internal_variability.source must be 'picontrol' or "
+            f"'ensemble_spread', got '{source}'"
+        )
+        raise ValueError(msg)
+    return source
+
+
+def _ensemble_spread_sigma(members: np.ndarray, statistic: str) -> float:
+    """Between-member σ (ddof=1) of a statistic of an ensemble.
+
+    ``members`` is ``(n_members, n_time)``; ``statistic`` is ``"mean"`` (the
+    window mean) or ``"trend"`` (OLS slope per step), evaluated per member.
+    Fewer than three members with a finite statistic give 0.0 — "no σ_int
+    available", exactly as when the piControl table has no entry — because a
+    standard deviation from two values has one degree of freedom.
+    """
+    ensemble = np.atleast_2d(np.asarray(members, dtype=float))
+    if statistic == "mean":
+        with np.errstate(all="ignore"):
+            values = np.array([np.nanmean(row) if np.isfinite(row).any() else np.nan for row in ensemble])
+    elif statistic == "trend":
+        values = np.array([scoring.ols_trend(row) for row in ensemble], dtype=float)
+    else:
+        msg = f"Unknown statistic '{statistic}' (expected 'mean' or 'trend')"
+        raise ValueError(msg)
+    values = values[np.isfinite(values)]
+    if values.size < _MIN_MEMBERS_FOR_SPREAD:
+        return 0.0
+    return float(values.std(ddof=1))
+
+
 def sigma_internal_for(
     table: SigmaInternal | None,
     var_id: str,
@@ -1089,7 +1250,7 @@ def empty_score_row(
     var_id: str,
     reason: str = "",
     *,
-    scorer: str = SCORER,
+    scorer: str | None = None,
 ) -> dict[str, Any]:
     """A score row with every numeric column NaN and every text column empty.
 
@@ -1109,7 +1270,7 @@ def empty_score_row(
         data_id=data_id,
         data_type=data_type,
         var_id=var_id,
-        scorer=scorer,
+        scorer=scorer_tag() if scorer is None else scorer,
         reason=reason,
     )
     return row
@@ -1130,16 +1291,29 @@ def _score_row(
     monthly: bool,
     settings: dict[str, Any],
     obs_sigma: float | np.ndarray = 0.0,
+    times: pd.Series | pd.DatetimeIndex | None = None,
+    member_labels: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Fair CRPS + ESS SE + block-bootstrap CI for one stacked ensemble."""
+    """Fair CRPS + ESS SE + block-bootstrap CI for one stacked ensemble.
+
+    ``times`` (the steps' dates) lets the row carry its per-step CRPS
+    (:class:`_StepData`): the ``E_ref`` window cuts on it and the per-step table
+    is written from it. ``member_labels`` names the members for the
+    leave-one-member-out rows.
+    """
     n_draws = int(get_threshold("tier2.obs_uncertainty.n_draws"))
-    crps_t = scoring.crps_fair_with_obs_draws(
-        members,
-        obs,
-        obs_sigma=obs_sigma,
-        n_draws=n_draws,
-        seed=int(get_threshold("tier2.obs_uncertainty.seed")),
-    )
+    obs_seed = int(get_threshold("tier2.obs_uncertainty.seed"))
+
+    def crps_of(ensemble: np.ndarray) -> np.ndarray:
+        return scoring.crps_fair_with_obs_draws(
+            ensemble,
+            obs,
+            obs_sigma=obs_sigma,
+            n_draws=n_draws,
+            seed=obs_seed,
+        )
+
+    crps_t = crps_of(members)
     summary = scoring.crps_ess_from_series(crps_t, members.shape[0])
     block_length = (
         settings["block_length_monthly"] if monthly else settings["block_length_annual"]
@@ -1166,6 +1340,17 @@ def _score_row(
         block_length=float(block_length),
         sigma_obs=float(np.mean(np.broadcast_to(obs_sigma, obs.shape))),
     )
+    if times is not None:
+        stamps = pd.to_datetime(pd.Series(times))
+        row[_STEPS_KEY] = _StepData(
+            kind=STEP_KIND_TIME,
+            steps=_iso_dates(stamps),
+            years=stamps.dt.year.to_numpy(),
+            crps=crps_t,
+            members=members,
+            member_labels=member_labels,
+            crps_fn=crps_of,
+        )
     return row
 
 
@@ -1192,13 +1377,22 @@ def _climatology_row(
     baseline: dict[tuple[str, str], pd.DataFrame] | None = None,
     sigma: pd.Series | None = None,
     floor: float = 0.0,
+    period: tuple[int, int] | None = None,
+    window: tuple[int, int | None] | None = None,
 ) -> dict[str, Any]:
-    """Baseline (i) as a distribution (see :mod:`climatebench2.baselines`)."""
+    """Baseline (i) as a distribution (see :mod:`climatebench2.baselines`).
+
+    ``period`` is the baseline window it samples (default
+    ``tier2.climatology_baseline_period``) and ``window`` the steps it is
+    scored on (default: ``tier2.test_window_start`` onwards).
+    """
     ref = reference[["time", column]].dropna().sort_values("time")
     if ref.empty:
         return _empty_row(CLIMATOLOGY_DATA_ID, "baseline", column, "no reference")
     times = pd.to_datetime(ref["time"])
-    year_0, year_1 = get_threshold("tier2.climatology_baseline_period")
+    year_0, year_1 = period or get_threshold("tier2.climatology_baseline_period")
+    if window is None:
+        window = (int(get_threshold("tier2.test_window_start")), None)
     years = times.dt.year.to_numpy()
     monthly = is_monthly(ref["time"])
 
@@ -1226,7 +1420,7 @@ def _climatology_row(
 
     # Score the baseline on the reserved test window — the same target steps
     # the models are scored on, never on the window it was fitted to.
-    is_target = years >= int(get_threshold("tier2.test_window_start"))
+    is_target = windows.in_scored_window(years, window)
     if is_target.sum() < _MIN_OVERLAP:
         is_target = (years < int(year_0)) | (years > int(year_1))
     if is_target.sum() < _MIN_OVERLAP:
@@ -1268,6 +1462,7 @@ def _climatology_row(
         monthly=monthly,
         settings=settings,
         obs_sigma=_sigma_at(sigma, target_times, floor),
+        times=target_times,
     )
 
 
@@ -1305,6 +1500,8 @@ def _pattern_scaling_row(
     baseline: dict[tuple[str, str], pd.DataFrame] | None = None,
     sigma: pd.Series | None = None,
     floor: float = 0.0,
+    period: tuple[int, int] | None = None,
+    window: tuple[int, int | None] | None = None,
 ) -> dict[str, Any] | None:
     """Baseline (iii): the calibrated two-layer EBM, as an ensemble.
 
@@ -1336,7 +1533,11 @@ def _pattern_scaling_row(
     def _reason(text: str) -> dict[str, Any]:
         return _empty_row(PATTERN_SCALING_DATA_ID, "baseline", column, text)
 
-    first, last = (int(y) for y in get_threshold("tier2.climatology_baseline_period"))
+    first, last = (
+        int(y) for y in (period or get_threshold("tier2.climatology_baseline_period"))
+    )
+    if window is None:
+        window = (int(get_threshold("tier2.test_window_start")), None)
     end = int(get_threshold("tier2.pattern_scaling.calibration_end_year"))
     minimum = int(get_threshold("tier2.pattern_scaling.min_calibration_years"))
     years, values = _annual_observed_record(reference, column, baseline)
@@ -1376,8 +1577,9 @@ def _pattern_scaling_row(
     # Score it on the reserved test window — the steps the models are scored
     # on — never on the years it was calibrated to.
     target_years = pd.to_datetime(ref["time"]).dt.year.to_numpy()
-    covered = np.isin(target_years, calibration.years) & (
-        target_years >= int(get_threshold("tier2.test_window_start"))
+    covered = np.isin(target_years, calibration.years) & windows.in_scored_window(
+        target_years,
+        window,
     )
     if covered.sum() < _MIN_OVERLAP:
         return _reason(
@@ -1402,12 +1604,428 @@ def _pattern_scaling_row(
         monthly=False,
         settings=settings,
         obs_sigma=_sigma_at(sigma, ref["time"][covered], floor),
+        times=ref["time"][covered],
     )
     row["value"] = calibration.value  # the one calibrated parameter
     return row
 
 
-def _apply_reference_skill(scored: dict[tuple[str, str], dict[str, Any]]) -> None:
+# ---------------------------------------------------------------------------
+# Pluggable baselines (the registry)
+# ---------------------------------------------------------------------------
+
+#: The three layouts the pass scores. A baseline declares which it speaks to.
+LAYOUT_TIME = "time"
+LAYOUT_EOF = "eof"
+LAYOUT_SCALAR = "scalar"
+_LAYOUTS = (LAYOUT_TIME, LAYOUT_EOF, LAYOUT_SCALAR)
+
+#: ``tier2.baselines`` when the key is absent: ClimateBench2's two baselines,
+#: in the order their rows have always been written.
+DEFAULT_BASELINES: tuple[str, ...] = ("climatology", "pattern_scaling")
+
+
+@dataclass(frozen=True, eq=False)
+class BaselineContext:
+    """Everything a baseline may use to forecast one scored variable.
+
+    One context is built per ``(diagnostic, variable)`` and per layout
+    (:attr:`layout`): the time-series layout, the EOF-coefficient layout or the
+    aggregated-scalar layout. It is exactly what ClimateBench2's own two
+    baselines receive, plus the resolved windows, so a baseline never has to
+    read the thresholds to learn where it is scored.
+
+    ``var_id``
+        The scored variable (a ``raw_output`` column; the ``var_id`` of an
+        EOF table).
+    ``diagnostic``
+        The suite entry name == the DuckDB schema the rows land in.
+    ``layout``
+        ``"time"``, ``"eof"`` or ``"scalar"``.
+    ``reference``
+        The observed target **as scored**: columns ``time`` and ``value`` (an
+        anomaly where the entry is scored on anomalies, cut to the scored
+        window). EOF layout: ``mode`` and ``value`` (the standardised
+        coefficients). Scalar layout: a single row with ``value``.
+    ``reference_full``
+        Time layout only: the reference's whole record, i.e. ``reference``
+        plus the pre-window record that ``ReferenceBaselineRecord`` stores
+        (in the same anomaly space) — the sample a baseline is fitted on.
+        Other layouts: the same as ``reference``.
+    ``monthly``
+        Whether the time axis is monthly (else annual). False off the time
+        layout.
+    ``settings``
+        The bootstrap settings (``tier2.bootstrap``) rows are scored with.
+    ``sigma_obs``
+        The observational σ of the scored steps: a ``pd.Series`` indexed by
+        the reference's times (time layout), a float (scalar layout) or
+        ``None``. Pass it through :meth:`score`, which aligns it to your
+        steps; every model and baseline sees the same obs draws.
+    ``sigma_floor``
+        The protocol floor (``tier2.obs_sigma``) used where ``sigma_obs`` has
+        no value for a step.
+    ``baseline_records``
+        The pre-window ``reference_baseline`` series the database carries,
+        ``(variable, "monthly" | "annual") -> frame``, in anomaly space.
+    ``baseline_period``
+        ``(first_year, last_year)`` of the window the anomalies are taken
+        about and the Climatology sample is drawn from.
+    ``window``
+        ``(first_year, last_year)`` the entry is scored on; ``last_year`` is
+        ``None`` when the window is open-ended (the default: every step from
+        ``tier2.test_window_start`` on).
+    ``raw``
+        The table the pass is scoring (anomalised and cut for a time
+        series; this variable's rows for an EOF table): a baseline whose
+        predictor lives in the same table can read it here.
+    """
+
+    var_id: str
+    diagnostic: str
+    layout: str
+    reference: pd.DataFrame
+    reference_full: pd.DataFrame
+    monthly: bool
+    settings: dict[str, Any]
+    sigma_obs: Any = None
+    sigma_floor: float = 0.0
+    baseline_records: dict[tuple[str, str], pd.DataFrame] | None = None
+    baseline_period: tuple[int, int] = (0, 0)
+    window: tuple[int, int | None] = (0, None)
+    raw: pd.DataFrame | None = None
+
+    def score(
+        self,
+        members: np.ndarray,
+        obs: np.ndarray,
+        times: pd.Series | pd.DatetimeIndex | None = None,
+    ) -> dict[str, Any]:
+        """Score a baseline ensemble into a row, exactly as the models' are.
+
+        ``members`` is ``(n_members, n_steps)`` (scalar layout: ``(n_members,)``)
+        and ``obs`` the observed values of those steps. Time layout: ``times``
+        are the steps' dates (they align ``sigma_obs`` and label the steps).
+        The row has fair CRPS, its ESS error and its bootstrap interval; the
+        registry stamps its ``data_id`` and ``data_type``.
+        """
+        members = np.asarray(members, dtype=float)
+        obs = np.atleast_1d(np.asarray(obs, dtype=float))
+        if self.layout == LAYOUT_EOF:
+            return _eof_score_row(
+                data_id="",
+                data_type="baseline",
+                var_id=self.var_id,
+                members=np.atleast_2d(members),
+                obs=obs,
+                settings=self.settings,
+                modes=self.reference["mode"].to_numpy(float),
+            )
+        if self.layout == LAYOUT_SCALAR:
+            return _scalar_score_row(
+                data_id="",
+                data_type="baseline",
+                var_id=self.var_id,
+                values=members.reshape(-1),
+                obs=float(obs.reshape(-1)[0]),
+                sigma_obs=float(self.sigma_obs or 0.0),
+            )
+        if times is None:
+            msg = "BaselineContext.score needs the steps' `times` on the time layout"
+            raise ValueError(msg)
+        times = pd.Series(pd.to_datetime(pd.Series(times)).to_numpy())
+        return _score_row(
+            data_id="",
+            data_type="baseline",
+            var_id=self.var_id,
+            members=np.atleast_2d(members),
+            obs=obs,
+            monthly=self.monthly,
+            settings=self.settings,
+            obs_sigma=_sigma_at(self.sigma_obs, times, self.sigma_floor),
+            times=times,
+        )
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """One registered baseline: its function, its row's ``data_id``, its layouts."""
+
+    name: str
+    fn: Callable[[BaselineContext], dict[str, Any] | None]
+    data_id: str
+    layouts: tuple[str, ...]
+
+    def __call__(self, context: BaselineContext) -> dict[str, Any] | None:
+        """Run the baseline function."""
+        return self.fn(context)
+
+
+#: ``name -> Baseline``. ClimateBench2's two baselines are registered below at
+#: import; a package registers its own at its import time
+#: (:func:`register_baseline`) and lists the name in ``tier2.baselines``.
+BASELINES: dict[str, Baseline] = {}
+
+
+def register_baseline(
+    name: str,
+    fn: Callable[[BaselineContext], dict[str, Any] | None],
+    *,
+    data_id: str | None = None,
+    layouts: tuple[str, ...] = (LAYOUT_TIME,),
+) -> None:
+    """Register a baseline under ``name`` (idempotent for the same function).
+
+    ``fn(context)`` returns a score row — build it with
+    :meth:`BaselineContext.score` — or ``None`` when the baseline has nothing
+    to say for this variable (no row is written). ``data_id`` is the stable
+    ``data_id`` of the baseline's row (default: ``name``); the registry stamps
+    it, with ``data_type = "baseline"``, onto whatever row ``fn`` returns, so
+    the row can be found again (``E_ref`` in ``climatology`` mode finds
+    :data:`CLIMATOLOGY_DATA_ID` this way). ``layouts`` lists the layouts the
+    function is called for (``"time"``, ``"eof"``, ``"scalar"``).
+
+    It runs only when ``name`` is listed in ``tier2.baselines``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown layout, or a name already taken by another function.
+    """
+    unknown = set(layouts) - set(_LAYOUTS)
+    if unknown:
+        msg = f"Unknown baseline layout(s) {sorted(unknown)} (expected {_LAYOUTS})"
+        raise ValueError(msg)
+    existing = BASELINES.get(name)
+    if existing is not None and existing.fn is not fn:
+        msg = f"A different baseline is already registered as '{name}'"
+        raise ValueError(msg)
+    BASELINES[name] = Baseline(
+        name=name,
+        fn=fn,
+        data_id=name if data_id is None else str(data_id),
+        layouts=tuple(layouts),
+    )
+
+
+def configured_baselines(layout: str) -> list[Baseline]:
+    """The baselines ``tier2.baselines`` lists that speak to ``layout``, in order.
+
+    Read when the pass runs, never at import: the threshold stack can change
+    after this module is imported.
+    """
+    names = get_threshold("tier2.baselines", None)
+    names = list(DEFAULT_BASELINES) if names is None else list(names)
+    selected: list[Baseline] = []
+    for name in names:
+        if name not in BASELINES:
+            msg = (
+                f"tier2.baselines lists '{name}', which is not registered "
+                f"(registered: {sorted(BASELINES)}). Import the package that "
+                f"calls register_baseline('{name}', ...) before scoring."
+            )
+            raise ValueError(msg)
+        if layout in BASELINES[name].layouts:
+            selected.append(BASELINES[name])
+    return selected
+
+
+def _run_baselines(
+    context: BaselineContext,
+    scored: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    """Run every configured baseline of ``context.layout``, adding its rows."""
+    for baseline in configured_baselines(context.layout):
+        row = baseline(context)
+        if row is None:
+            continue
+        full = empty_score_row(baseline.data_id, "baseline", context.var_id)
+        full.update(row)
+        full["data_id"] = baseline.data_id
+        if not full.get("data_type"):
+            full["data_type"] = "baseline"
+        if not full.get("var_id"):
+            full["var_id"] = context.var_id
+        scored[str(full["data_type"]), baseline.data_id] = full
+
+
+def _reference_full(
+    reference: pd.DataFrame,
+    column: str,
+    baseline: dict[tuple[str, str], pd.DataFrame] | None,
+    *,
+    monthly: bool,
+) -> pd.DataFrame:
+    """The reference's scored rows plus its recorded pre-window series."""
+    frames = [reference[["time", column]].dropna()]
+    recorded = _baseline_window_series(baseline, column, monthly=monthly)
+    if recorded is not None:
+        frames.append(recorded[["time", column]].dropna())
+    joined = (
+        pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset="time")
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+    return joined.rename(columns={column: "value"})
+
+
+def _column_frame(context: BaselineContext) -> pd.DataFrame:
+    """The context's reference, with the value column named as the variable."""
+    return context.reference.rename(columns={"value": context.var_id})
+
+
+def _climatology_baseline(context: BaselineContext) -> dict[str, Any] | None:
+    """Registered form of :func:`_climatology_row`."""
+    return _climatology_row(
+        _column_frame(context),
+        context.var_id,
+        context.settings,
+        baseline=context.baseline_records,
+        sigma=context.sigma_obs,
+        floor=context.sigma_floor,
+        period=context.baseline_period,
+        window=context.window,
+    )
+
+
+def _pattern_scaling_baseline(context: BaselineContext) -> dict[str, Any] | None:
+    """Registered form of the pattern-scaling baseline, per layout."""
+    if context.layout == LAYOUT_EOF:
+        return _eof_pattern_scaling_row(
+            context.raw if context.raw is not None else context.reference,
+            context.var_id,
+        )
+    return _pattern_scaling_row(
+        _column_frame(context),
+        context.var_id,
+        context.settings,
+        baseline=context.baseline_records,
+        sigma=context.sigma_obs,
+        floor=context.sigma_floor,
+        period=context.baseline_period,
+        window=context.window,
+    )
+
+
+register_baseline("climatology", _climatology_baseline, data_id=CLIMATOLOGY_DATA_ID)
+register_baseline(
+    "pattern_scaling",
+    _pattern_scaling_baseline,
+    data_id=PATTERN_SCALING_DATA_ID,
+    layouts=(LAYOUT_TIME, LAYOUT_EOF),
+)
+
+
+def _member_label(data_id: str, variants: dict[str, str]) -> str:
+    """A member's label in the per-step table: its ``variant``, else its id."""
+    variant = variants.get(data_id, "")
+    return variant if variant and variant != "nan" else data_id
+
+
+#: Columns of the ``score_steps`` table, with their DuckDB types.
+_STEP_COLUMNS: dict[str, str] = {
+    "data_id": "VARCHAR",
+    "data_type": "VARCHAR",
+    "var_id": "VARCHAR",
+    "step_kind": "VARCHAR",
+    "step": "VARCHAR",
+    "left_out": "VARCHAR",
+    "crps": "DOUBLE",
+    "scorer": "VARCHAR",
+}
+
+#: Fewest members a model needs for leave-one-member-out rows (the ensemble
+#: left behind must still have the two members a fair CRPS needs).
+_MIN_MEMBERS_LEAVE_ONE_OUT = _MIN_MEMBERS_FOR_SPREAD
+
+
+def persist_steps_enabled() -> bool:
+    """Whether the pass writes ``score_steps`` (``tier2.persist_steps``, default off)."""
+    return bool(get_threshold("tier2.persist_steps", False))
+
+
+def _drain_steps(
+    rows: Any,  # noqa: ANN401
+    steps_out: list[dict[str, Any]] | None = None,
+) -> None:
+    """Take the private per-step payload off finished rows.
+
+    With ``steps_out`` the per-step rows are appended to it: one per step with
+    ``left_out = ""`` and, for a model (never a baseline, whose pseudo-members
+    are not members of anything) with at least three members, one set per
+    left-out member — the fair CRPS of the ensemble without that member, under
+    the same observations and observational draws.
+    """
+    for row in rows:
+        payload: _StepData | None = row.pop(_STEPS_KEY, None)
+        if payload is None or steps_out is None:
+            continue
+        head = {
+            "data_id": str(row["data_id"]),
+            "data_type": str(row["data_type"]),
+            "var_id": str(row["var_id"]),
+            "step_kind": payload.kind,
+            "scorer": scorer_tag(),
+        }
+
+        def emit(left_out: str, crps: np.ndarray, head: dict[str, Any] = head, payload: _StepData = payload) -> None:
+            steps_out.extend(
+                {**head, "step": step, "left_out": left_out, "crps": float(value)}
+                for step, value in zip(payload.steps, crps, strict=True)
+            )
+
+        emit("", payload.crps)
+        n_members = payload.members.shape[0]
+        if (
+            payload.member_labels is not None
+            and row["data_type"] != "baseline"
+            and n_members >= _MIN_MEMBERS_LEAVE_ONE_OUT
+        ):
+            for i, label in enumerate(payload.member_labels):
+                emit(label, payload.crps_fn(np.delete(payload.members, i, axis=0)))
+
+
+def _e_ref_settings() -> tuple[str, tuple[int, int] | None]:
+    """``(mode, window)`` of ``E_ref``: ``tier2.e_ref.mode`` / ``.window``.
+
+    Both are optional protocol switches (absent in ClimateBench2's
+    ``thresholds.yml``): the default is the median of the comparison models over
+    the whole scored window. Read when the pass runs, never at import.
+    """
+    mode = str(get_threshold("tier2.e_ref.mode", E_REF_ENSEMBLE_MEDIAN))
+    if mode not in _E_REF_MODES:
+        msg = f"tier2.e_ref.mode must be one of {_E_REF_MODES}, got '{mode}'"
+        raise ValueError(msg)
+    window = get_threshold("tier2.e_ref.window", None)
+    if window is None:
+        return mode, None
+    first, last = (int(year) for year in window)
+    if first > last:
+        msg = f"tier2.e_ref.window must be [first_year, last_year], got {window}"
+        raise ValueError(msg)
+    return mode, (first, last)
+
+
+def _windowed_crps(row: dict[str, Any], window: tuple[int, int] | None) -> float:
+    """A row's CRPS over the ``E_ref`` window (its own ``crps`` when unwindowed).
+
+    Only a time-resolved row has a time axis to cut: an EOF or scalar row
+    keeps its full-record value, and a row that carries no per-step CRPS (a
+    ``reason`` row, or one a baseline built by hand) has no windowed value.
+    """
+    crps = float(row["crps"])
+    if window is None or not np.isfinite(crps):
+        return crps
+    steps: _StepData | None = row.get(_STEPS_KEY)
+    return float("nan") if steps is None else steps.window_mean(window)
+
+
+def _apply_reference_skill(
+    scored: dict[tuple[str, str], dict[str, Any]],
+    *,
+    kind: str = STEP_KIND_TIME,
+) -> None:
     """Fill ``e_ref`` / ``n_ref_models`` / ``skill`` in place.
 
     ``E_ref`` is the median of the per-model fair CRPS over the comparison
@@ -1415,20 +2033,61 @@ def _apply_reference_skill(scored: dict[tuple[str, str], dict[str, Any]]) -> Non
     name (paper §5.6). Comparison models are scored the same way, so each of
     them is also left out of its own reference. Observational products never
     enter: they carry no ``crps``.
+
+    Two optional switches (:func:`_e_ref_settings`) change that:
+
+    ``tier2.e_ref.window = [first, last]``
+        ``E_ref`` and the CRPS that enters ``skill`` are means over those years
+        only — for every row alike (the entry, each comparison model, the
+        baselines). ``crps`` keeps the full-window value; the windowed one is
+        written as ``crps_ref_window`` and the window as ``e_ref_window``
+        (``"2015-2021"``). ``skill = 1 - crps_ref_window / e_ref``. A table with
+        no time axis (``kind`` ``mode`` / ``scalar``) is not windowed: its
+        ``crps_ref_window`` is its full-record ``crps`` and ``e_ref_window`` says
+        ``"full"``.
+    ``tier2.e_ref.mode = climatology``
+        ``E_ref`` is the Climatology baseline row's CRPS for that variable (the
+        windowed one, if a window is set) and no comparison model is needed
+        (``n_ref_models = 0``); the Climatology row's own skill is therefore 0.
+        A layout with no Climatology baseline (EOF, scalar) has no ``E_ref``
+        in this mode. ``e_ref_mode`` is written on every row, and only in this
+        mode, so a default run's table is unchanged.
     """
-    comparison = {
-        name: row["crps"]
-        for (data_type, name), row in scored.items()
-        if data_type == "other" and np.isfinite(row["crps"])
+    mode, window = _e_ref_settings()
+    crps = {
+        key: _windowed_crps(row, window) for key, row in scored.items()
     }
-    for row in scored.values():
-        others = [e for n, e in comparison.items() if n != row["data_id"]]
-        row["n_ref_models"] = float(len(others))
-        if others:
-            e_ref = float(np.median(others))
+    if mode == E_REF_CLIMATOLOGY:
+        clim = crps.get(("baseline", CLIMATOLOGY_DATA_ID), float("nan"))
+        fixed = clim if np.isfinite(clim) and clim > 0 else float("nan")
+    else:
+        comparison = {
+            name: crps[data_type, name]
+            for (data_type, name) in scored
+            if data_type == "other" and np.isfinite(crps[data_type, name])
+        }
+    label = (
+        f"{window[0]}-{window[1]}"
+        if window is not None and kind == STEP_KIND_TIME
+        else "full"
+    )
+    for key, row in scored.items():
+        if mode == E_REF_CLIMATOLOGY:
+            row["n_ref_models"] = 0.0
+            e_ref = fixed
+        else:
+            others = [e for n, e in comparison.items() if n != row["data_id"]]
+            row["n_ref_models"] = float(len(others))
+            e_ref = float(np.median(others)) if others else float("nan")
+        if np.isfinite(e_ref):
             row["e_ref"] = e_ref
-            if np.isfinite(row["crps"]) and e_ref > 0:
-                row["skill"] = 1.0 - row["crps"] / e_ref
+        if window is not None:
+            row["crps_ref_window"] = crps[key]
+            row["e_ref_window"] = label
+        if mode != E_REF_ENSEMBLE_MEDIAN:
+            row["e_ref_mode"] = mode
+        if np.isfinite(e_ref) and np.isfinite(crps[key]) and e_ref > 0:
+            row["skill"] = 1.0 - crps[key] / e_ref
 
 
 def _trend_consistency_row(
@@ -1454,15 +2113,25 @@ def _trend_consistency_row(
         return None
     obs_trend = scoring.ols_trend(obs)
     member_trends = np.array([scoring.ols_trend(row) for row in members], dtype=float)
-    sigma_int = sigma_internal_for(sigma_internal, column, "trend", n_time)
+    # In `ensemble_spread` mode σ_int IS the ensemble's own spread. The test's
+    # var(member trends) term already is that spread, so adding σ_int on top
+    # would count it twice (σ_total² = 2·var + σ_obs²): the spread is
+    # reported in `sigma_internal` but enters σ_total once.
+    spread_mode = internal_variability_source() == SIGMA_INT_ENSEMBLE_SPREAD
+    if spread_mode:
+        sigma_int = _ensemble_spread_sigma(members, "trend")
+        sigma_added = 0.0
+    else:
+        sigma_int = sigma_internal_for(sigma_internal, column, "trend", n_time)
+        sigma_added = sigma_int
     sigma_step = float(np.sqrt(np.mean(np.broadcast_to(obs_sigma, obs.shape) ** 2)))
     sigma_obs_trend = scoring.ols_trend_sigma(sigma_step, n_time)
-    if members.shape[0] < _MIN_MEMBERS and sigma_int <= 0.0 and sigma_obs_trend <= 0.0:
+    if members.shape[0] < _MIN_MEMBERS and sigma_added <= 0.0 and sigma_obs_trend <= 0.0:
         return None  # no spread at all: the test would divide by zero
     result = scoring.ensemble_consistency(
         member_trends,
         obs_trend,
-        sigma_internal=sigma_int,
+        sigma_internal=sigma_added,
         sigma_obs=sigma_obs_trend,
         p_threshold=float(get_threshold("tier2.consistency_p_value")),
     )
@@ -1542,6 +2211,7 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
     baseline: dict[tuple[str, str], pd.DataFrame] | None = None,
     sigma_internal: SigmaInternal | None = None,
     diagnostic: str = "",
+    steps_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Score one diagnostic's ``raw_output`` table; returns metrics rows.
 
@@ -1551,6 +2221,9 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
     to the scored window (:func:`anomalise_raw_output`), so everything below
     works on the quantity the paper defines regime (a) over.
 
+    ``steps_out``, if given, collects the per-step fair CRPS of every scored
+    model and baseline (the ``score_steps`` rows, :func:`_drain_steps`).
+
     Pure pandas/numpy — the database plumbing is in :func:`score_database`.
     """
     if "time" not in raw_df.columns or "data_id" not in raw_df.columns:
@@ -1558,20 +2231,48 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
     settings = settings or _bootstrap_settings()
     names = source_names(data_sources)
     categories = source_categories(data_sources)
+    variants = _source_column(data_sources, "variant")
     var_columns = [c for c in raw_df.columns if c not in _META_COLUMNS]
     if raw_df.empty or not var_columns:
         return []
 
     carriers = variable_carriers(raw_df, var_columns)
     anomalies = windows.scores_anomalies(diagnostic)
+    period = windows.anomaly_baseline_years(diagnostic)
+    window = windows.scored_window(diagnostic)
     no_baseline: set[tuple[str, str]] = set()
     unscorable: list[str] = []
     if anomalies:
-        context = anomalise_raw_output(raw_df, baseline, var_columns)
+        context = anomalise_raw_output(
+            raw_df,
+            baseline,
+            var_columns,
+            diagnostic=diagnostic,
+        )
         raw_df, baseline = context.raw, context.baseline
         no_baseline = context.missing
         unscorable = [c for c in var_columns if c in context.reference_missing]
         var_columns = [c for c in var_columns if c not in context.reference_missing]
+    elif windows.has_custom_scored_window(diagnostic):
+        # Absolute series are normally cut by the load window alone; a
+        # configured window is enforced here as well.
+        # The reference's own baseline-period rows are kept as the Climatology
+        # sample before they are cut away.
+        own = AnomalyContext(raw=raw_df, baseline=dict(baseline or {}), period=period)
+        full_references = raw_df[raw_df["data_type"] == "reference"]
+        for column in var_columns:
+            full = reference_for_variable(full_references, column)
+            if full is not None:
+                _record_own_baseline(
+                    own,
+                    full,
+                    column,
+                    monthly=is_monthly(full[["time", column]].dropna()["time"]),
+                    years=period,
+                )
+        baseline = own.baseline
+        keep = windows.in_scored_window(pd.to_datetime(raw_df["time"]).dt.year, window)
+        raw_df = raw_df[keep].reset_index(drop=True)
 
     references = raw_df[raw_df["data_type"] == "reference"]
     if references.empty and not unscorable:
@@ -1677,6 +2378,11 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
                     monthly=monthly,
                     settings=settings,
                     obs_sigma=obs_sigma,
+                    times=times,
+                    member_labels=[
+                        _member_label(str(f["data_id"].iloc[0]), variants)
+                        for f in member_frames
+                    ],
                 )
             # Regime (c) is defined on the *annual* warming rate; a monthly
             # series would need a σ_int chunked the same way, which the
@@ -1694,28 +2400,36 @@ def score_raw_output(  # noqa: C901, PLR0912, PLR0915
                 if row is not None:
                     consistency.append(row)
 
-        clim = _climatology_row(
-            reference,
-            column,
-            settings,
-            baseline=baseline,
-            sigma=sigma,
-            floor=floor,
+        ref_sorted = reference[["time", column]].dropna().sort_values("time")
+        ref_monthly = not ref_sorted.empty and is_monthly(ref_sorted["time"])
+        _run_baselines(
+            BaselineContext(
+                var_id=column,
+                diagnostic=diagnostic,
+                layout=LAYOUT_TIME,
+                reference=reference[["time", column]].rename(
+                    columns={column: "value"},
+                ),
+                reference_full=_reference_full(
+                    reference,
+                    column,
+                    baseline,
+                    monthly=ref_monthly,
+                ),
+                monthly=ref_monthly,
+                settings=settings,
+                sigma_obs=sigma,
+                sigma_floor=floor,
+                baseline_records=baseline,
+                baseline_period=period,
+                window=window,
+                raw=raw_df,
+            ),
+            scored,
         )
-        scored[clim["data_type"], clim["data_id"]] = clim
 
-        pattern = _pattern_scaling_row(
-            reference,
-            column,
-            settings,
-            baseline=baseline,
-            sigma=sigma,
-            floor=floor,
-        )
-        if pattern is not None:
-            scored[pattern["data_type"], pattern["data_id"]] = pattern
-
-        _apply_reference_skill(scored)
+        _apply_reference_skill(scored, kind=STEP_KIND_TIME)
+        _drain_steps(scored.values(), steps_out)
         rows.extend(scored.values())
         rows.extend(consistency)
     rows.extend(le_spread_rows(groups, truth, var_columns, carriers=carriers))
@@ -2001,12 +2715,19 @@ def _scalar_consistency_row(
     sigma_internal: SigmaInternal | None,
 ) -> dict[str, Any] | None:
     """Regime (c) for an aggregated scalar (metrics_reference.md §II.1)."""
-    sigma_int = _scalar_sigma_internal(sigma_internal, var_id)
+    if internal_variability_source() == SIGMA_INT_ENSEMBLE_SPREAD:
+        # The scalar is itself the window statistic; see `_trend_consistency_row`
+        # for why the spread is reported but not added to σ_total a second time.
+        sigma_int = _ensemble_spread_sigma(np.asarray(values, dtype=float)[:, None], "mean")
+        sigma_added = 0.0
+    else:
+        sigma_int = _scalar_sigma_internal(sigma_internal, var_id)
+        sigma_added = sigma_int
     try:
         result = scoring.ensemble_consistency(
             values,
             obs,
-            sigma_internal=sigma_int,
+            sigma_internal=sigma_added,
             sigma_obs=sigma_obs,
             p_threshold=float(get_threshold("tier2.consistency_p_value")),
         )
@@ -2030,12 +2751,62 @@ def _scalar_consistency_row(
     return row
 
 
+def _scalar_score_row(
+    *,
+    data_id: str,
+    data_type: str,
+    var_id: str,
+    values: np.ndarray,
+    obs: float,
+    sigma_obs: float,
+    member_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fair CRPS of one aggregated scalar: members' values against the observation."""
+    n_draws = int(get_threshold("tier2.obs_uncertainty.n_draws"))
+    obs_seed = int(get_threshold("tier2.obs_uncertainty.seed"))
+    crps_k = scoring.crps_fair_with_obs_draws(
+        values[:, None],
+        np.array([obs], dtype=float),
+        obs_sigma=sigma_obs,
+        n_draws=n_draws,
+        seed=obs_seed,
+    )
+    summary = scoring.crps_independent_summary(crps_k, values.size)
+    row = _empty_row(data_id, data_type, var_id, "")
+    row.update(
+        crps=summary.score,
+        crps_se=summary.standard_error,
+        t_eff=summary.t_eff,
+        r1=summary.r1,
+        n_members=float(summary.n_members),
+        n_time=float(summary.n_time),
+        sigma_obs=sigma_obs,
+    )
+    row[_STEPS_KEY] = _StepData(
+        kind=STEP_KIND_SCALAR,
+        steps=["0"],
+        years=np.array([], dtype=int),
+        crps=crps_k,
+        members=values[:, None],
+        member_labels=member_labels,
+        crps_fn=lambda ensemble: scoring.crps_fair_with_obs_draws(
+            ensemble,
+            np.array([obs], dtype=float),
+            obs_sigma=sigma_obs,
+            n_draws=n_draws,
+            seed=obs_seed,
+        ),
+    )
+    return row
+
+
 def score_scalar_output(  # noqa: C901
     raw_df: pd.DataFrame,
     data_sources: pd.DataFrame | None,
     *,
     sigma_internal: SigmaInternal | None = None,
     diagnostic: str = "",
+    steps_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Score an aggregated-scalar ``raw_output`` (metrics_reference.md §II.1).
 
@@ -2051,6 +2822,7 @@ def score_scalar_output(  # noqa: C901
     """
     names = source_names(data_sources)
     categories = source_categories(data_sources)
+    variants = _source_column(data_sources, "variant")
     references = raw_df[raw_df["data_type"] == "reference"]
     var_columns = [
         c
@@ -2059,8 +2831,6 @@ def score_scalar_output(  # noqa: C901
         and not c.endswith(SCALAR_SIGMA_OBS_SUFFIX)
         and not _INDEX_COLUMN_RE.match(str(c))
     ]
-    n_draws = int(get_threshold("tier2.obs_uncertainty.n_draws"))
-    seed = int(get_threshold("tier2.obs_uncertainty.seed"))
 
     rows: list[dict[str, Any]] = []
     for column in var_columns:
@@ -2097,25 +2867,17 @@ def score_scalar_output(  # noqa: C901
                 scored[key]["n_members"] = float(values.size)
                 scored[key]["n_time"] = 1.0
             else:
-                crps_k = scoring.crps_fair_with_obs_draws(
-                    values[:, None],
-                    np.array([obs], dtype=float),
-                    obs_sigma=sigma_obs,
-                    n_draws=n_draws,
-                    seed=seed,
-                )
-                summary = scoring.crps_independent_summary(crps_k, values.size)
-                row = _empty_row(name, data_type, column, "")
-                row.update(
-                    crps=summary.score,
-                    crps_se=summary.standard_error,
-                    t_eff=summary.t_eff,
-                    r1=summary.r1,
-                    n_members=float(summary.n_members),
-                    n_time=float(summary.n_time),
+                scored[key] = _scalar_score_row(
+                    data_id=name,
+                    data_type=data_type,
+                    var_id=column,
+                    values=values,
+                    obs=float(obs),
                     sigma_obs=sigma_obs,
+                    member_labels=[
+                        _member_label(i, variants) for i in ids[key]
+                    ],
                 )
-                scored[key] = row
             row = _scalar_consistency_row(
                 data_id=name,
                 data_type=data_type,
@@ -2130,7 +2892,22 @@ def score_scalar_output(  # noqa: C901
 
         if not scored:
             continue
-        _apply_reference_skill(scored)
+        _run_baselines(
+            BaselineContext(
+                var_id=column,
+                diagnostic=diagnostic,
+                layout=LAYOUT_SCALAR,
+                reference=pd.DataFrame({"value": [float(obs)]}),
+                reference_full=pd.DataFrame({"value": [float(obs)]}),
+                monthly=False,
+                settings={},
+                sigma_obs=sigma_obs,
+                raw=raw_df,
+            ),
+            scored,
+        )
+        _apply_reference_skill(scored, kind=STEP_KIND_SCALAR)
+        _drain_steps(scored.values(), steps_out)
         rows.extend(scored.values())
         rows.extend(consistency)
     _apply_window_labels(
@@ -2163,6 +2940,7 @@ def score_eof_output(
     *,
     settings: dict[str, Any] | None = None,
     diagnostic: str = "",
+    steps_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Score a regime-(b) coefficient table (metrics_reference.md Tier II (b)).
 
@@ -2183,15 +2961,17 @@ def score_eof_output(
     settings = settings or _bootstrap_settings()
     names = source_names(data_sources)
     categories = source_categories(data_sources)
+    variants = _source_column(data_sources, "variant")
     rows: list[dict[str, Any]] = []
 
     for var_id, var_frame in raw_df.groupby("var_id", sort=True):
         references = var_frame[var_frame["data_type"] == "reference"]
         if references.empty:
             continue
-        obs = _coefficient_vector(
-            references[references["data_id"] == references["data_id"].iloc[0]],
-        )
+        reference_frame = references[
+            references["data_id"] == references["data_id"].iloc[0]
+        ].sort_values("mode")
+        obs = _coefficient_vector(reference_frame)
         if obs.size == 0:
             continue
 
@@ -2218,7 +2998,8 @@ def score_eof_output(
                     "observational product (a term in sigma_obs, not scored)",
                 )
                 continue
-            usable = [v for v in vectors if v.size == obs.size]
+            keep = [i for i, v in enumerate(vectors) if v.size == obs.size]
+            usable = [vectors[i] for i in keep]
             if not usable:
                 continue
             members = np.vstack(usable)
@@ -2234,15 +3015,33 @@ def score_eof_output(
                 members=members,
                 obs=obs,
                 settings=settings,
+                modes=reference_frame["mode"].to_numpy(float),
+                member_labels=[_member_label(ids[key][i], variants) for i in keep],
             )
 
         if not scored:
             continue
-        scored["baseline", PATTERN_SCALING_DATA_ID] = _eof_pattern_scaling_row(
-            var_frame,
-            str(var_id),
+        eof_reference = pd.DataFrame(
+            {
+                "mode": reference_frame["mode"].to_numpy(float),
+                "value": obs,
+            },
         )
-        _apply_reference_skill(scored)
+        _run_baselines(
+            BaselineContext(
+                var_id=str(var_id),
+                diagnostic=diagnostic,
+                layout=LAYOUT_EOF,
+                reference=eof_reference,
+                reference_full=eof_reference,
+                monthly=False,
+                settings=settings,
+                raw=var_frame,
+            ),
+            scored,
+        )
+        _apply_reference_skill(scored, kind=STEP_KIND_MODE)
+        _drain_steps(scored.values(), steps_out)
         rows.extend(scored.values())
     _apply_window_labels(
         rows,
@@ -2311,6 +3110,8 @@ def _eof_score_row(
     members: np.ndarray,
     obs: np.ndarray,
     settings: dict[str, Any],
+    modes: np.ndarray | None = None,
+    member_labels: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fair CRPS per coefficient, its equal-weight mean and mode bootstrap."""
     crps_k = scoring.crps_fair(members, obs)
@@ -2335,6 +3136,18 @@ def _eof_score_row(
         n_members=float(summary.n_members),
         n_time=float(summary.n_time),
         block_length=1.0,
+    )
+    mode_numbers = np.arange(1, obs.size + 1) if modes is None else np.asarray(modes)
+    row[_STEPS_KEY] = _StepData(
+        kind=STEP_KIND_MODE,
+        steps=[
+            str(int(m)) if float(m).is_integer() else str(m) for m in mode_numbers
+        ],
+        years=np.array([], dtype=int),
+        crps=crps_k,
+        members=members,
+        member_labels=member_labels,
+        crps_fn=lambda ensemble: scoring.crps_fair(ensemble, obs),
     )
     return row
 
@@ -2473,6 +3286,7 @@ def score_database(
             schema: _schema_tables(con, schema) for schema in _diagnostic_schemas(con)
         }
         baseline = _database_context(con, schemas)
+        persist = persist_steps_enabled()
         for schema, tables in schemas.items():
             if "raw_output" not in tables:
                 continue
@@ -2484,12 +3298,14 @@ def score_database(
                 if "data_sources" in tables
                 else None
             )
+            steps: list[dict[str, Any]] | None = [] if persist else None
             if is_eof_output(raw_df):
                 rows = score_eof_output(
                     raw_df,
                     sources,
                     settings=settings,
                     diagnostic=schema,
+                    steps_out=steps,
                 )
             elif is_scalar_output(raw_df):
                 rows = score_scalar_output(
@@ -2497,6 +3313,7 @@ def score_database(
                     sources,
                     sigma_internal=sigma_internal,
                     diagnostic=schema,
+                    steps_out=steps,
                 )
             else:
                 rows = score_raw_output(
@@ -2506,6 +3323,7 @@ def score_database(
                     baseline=baseline,
                     sigma_internal=sigma_internal,
                     diagnostic=schema,
+                    steps_out=steps,
                 )
             if not rows:
                 # Still clear this diagnostic's OWN earlier rows: a schema
@@ -2514,9 +3332,16 @@ def score_database(
                 # otherwise keep the scores of a previous `--rescore`
                 # for ever, and the pass would not be idempotent.
                 _clear_rows(con, schema, has_metrics="metrics" in tables)
+                _write_steps(con, schema, None, existing="score_steps" in tables)
                 continue
-            frame = pd.DataFrame(rows)[list(_SCORE_COLUMNS)]
+            frame = _score_frame(rows)
             _write_rows(con, schema, frame, has_metrics="metrics" in tables)
+            _write_steps(
+                con,
+                schema,
+                pd.DataFrame(steps, columns=list(_STEP_COLUMNS)) if persist else None,
+                existing="score_steps" in tables,
+            )
             report.diagnostics.append(schema)
             report.rows += len(frame)
             report.scored_models += int(frame["crps"].notna().sum())
@@ -2534,6 +3359,60 @@ def score_database(
     return report
 
 
+def _write_steps(
+    con: Any,  # noqa: ANN401
+    schema: str,
+    frame: pd.DataFrame | None,
+    *,
+    existing: bool,
+) -> None:
+    """Rewrite this pass's own rows of ``schema.score_steps``.
+
+    ``frame = None`` (``tier2.persist_steps`` off, or nothing scorable) only
+    deletes the pass's earlier rows from a table that exists — a default run
+    never creates the table. The pass is idempotent here exactly as it is for
+    ``metrics``: its rows (``scorer`` = :func:`scorer_tag`) are deleted, then
+    rewritten.
+    """
+    if existing:
+        con.execute(
+            f'DELETE FROM "{schema}"."score_steps" WHERE scorer = ?',  # noqa: S608
+            [scorer_tag()],
+        )
+    if frame is None:
+        return
+    con.register("cb2_score_steps", frame)
+    try:
+        if not existing:
+            definition = ", ".join(f'"{c}" {t}' for c, t in _STEP_COLUMNS.items())
+            con.execute(f'CREATE TABLE "{schema}"."score_steps" ({definition})')
+        columns = ", ".join(f'"{c}"' for c in _STEP_COLUMNS)
+        con.execute(
+            f'INSERT INTO "{schema}"."score_steps" ({columns}) '  # noqa: S608
+            f"SELECT {columns} FROM cb2_score_steps",
+        )
+    finally:
+        con.unregister("cb2_score_steps")
+
+
+def _score_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """The rows as a frame of :data:`_SCORE_COLUMNS` plus any optional column used.
+
+    An optional column (:data:`_OPTIONAL_SCORE_COLUMNS`) exists only if some row
+    carries it; rows without it get NaN / ``""``.
+    """
+    extra = {
+        column: dtype
+        for column, dtype in _OPTIONAL_SCORE_COLUMNS.items()
+        if any(column in row for row in rows)
+    }
+    frame = pd.DataFrame(rows)
+    for column, dtype in extra.items():
+        if dtype == "VARCHAR":
+            frame[column] = frame[column].fillna("").astype(str)
+    return frame[[*_SCORE_COLUMNS, *extra]]
+
+
 def _clear_rows(con: Any, schema: str, *, has_metrics: bool) -> None:  # noqa: ANN401
     """Delete this pass's own rows from ``schema.metrics``, if any."""
     if not has_metrics:
@@ -2542,7 +3421,7 @@ def _clear_rows(con: Any, schema: str, *, has_metrics: bool) -> None:  # noqa: A
         return
     con.execute(
         f'DELETE FROM "{schema}"."metrics" WHERE scorer = ?',  # noqa: S608
-        [SCORER],
+        [scorer_tag()],
     )
 
 
@@ -2563,7 +3442,11 @@ def _write_rows(
             )
             return
         existing = _table_columns(con, schema, "metrics")
-        for column, dtype in _SCORE_COLUMNS.items():
+        written = {
+            column: _SCORE_COLUMNS.get(column, _OPTIONAL_SCORE_COLUMNS.get(column))
+            for column in frame.columns
+        }
+        for column, dtype in written.items():
             if column not in existing:
                 con.execute(
                     f'ALTER TABLE "{schema}"."metrics" ADD COLUMN "{column}" {dtype}',
@@ -2571,9 +3454,9 @@ def _write_rows(
         if "scorer" in existing:
             con.execute(
                 f'DELETE FROM "{schema}"."metrics" WHERE scorer = ?',  # noqa: S608
-                [SCORER],
+                [scorer_tag()],
             )
-        columns = ", ".join(f'"{c}"' for c in _SCORE_COLUMNS)
+        columns = ", ".join(f'"{c}"' for c in frame.columns)
         con.execute(
             f'INSERT INTO "{schema}"."metrics" ({columns}) '  # noqa: S608
             f"SELECT {columns} FROM cb2_score_rows",
@@ -2592,7 +3475,12 @@ def score_databases(
     σ_int is collected from **all** of them first, so the Tier I database's
     piControl internal variability reaches the Tier II consistency test.
     """
-    sigma_internal = collect_internal_variability(db_paths)
+    # With `ensemble_spread` no piControl σ_int is read at all.
+    sigma_internal = (
+        collect_internal_variability(db_paths)
+        if internal_variability_source() == SIGMA_INT_PICONTROL
+        else {}
+    )
     return [
         score_database(path, settings=settings, sigma_internal=sigma_internal)
         for path in db_paths
